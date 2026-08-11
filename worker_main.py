@@ -1,10 +1,40 @@
 import asyncio
+import contextlib
 import logging
 import os
 import signal
 from pathlib import Path
 
 from mq_worker import WorkflowMQWorker
+
+
+def worker_reconnect_delay() -> float:
+    """Return a bounded retry delay without letting a bad env value kill the worker."""
+    try:
+        return max(float(os.getenv("WORKER_RECONNECT_DELAY", "2")), 0.1)
+    except ValueError:
+        return 2.0
+
+
+async def start_worker_or_stop(worker: WorkflowMQWorker, stop_event: asyncio.Event) -> bool:
+    """Start one worker instance unless process shutdown wins the race."""
+    start_task = asyncio.create_task(worker.start())
+    stop_task = asyncio.create_task(stop_event.wait())
+    done, _ = await asyncio.wait({start_task, stop_task}, return_when=asyncio.FIRST_COMPLETED)
+    if start_task in done:
+        stop_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await stop_task
+        await start_task
+        return True
+
+    # A TCP/DNS failure can leave a connection coroutine waiting longer than a
+    # container shutdown budget. Cancel it before worker.stop() closes partial
+    # resources, so SIGTERM is prompt even during the first broker connection.
+    start_task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await start_task
+    return False
 
 
 def load_env_from_dotenv() -> None:
@@ -50,8 +80,8 @@ async def _run_worker() -> None:
     setup_logging()
     logger = logging.getLogger(__name__)
 
-    worker = WorkflowMQWorker()
     stop_event = asyncio.Event()
+    reconnect_delay = worker_reconnect_delay()
 
     def _signal_handler(sig: signal.Signals) -> None:
         logger.info("Received signal %s, stopping worker...", sig.name)
@@ -65,18 +95,32 @@ async def _run_worker() -> None:
             pass
 
     logger.info("Worker service starting...")
-    try:
-        await worker.start()
-        logger.info("Worker started; waiting for messages")
-        await stop_event.wait()
-    except Exception as exc:  # noqa: BLE001
-        logger.exception("Worker crashed: %s", exc)
-        raise
-    finally:
+    while not stop_event.is_set():
+        # WorkflowMQWorker.stop() marks its instance as closing. Recreate it for
+        # every failed initial connection so a RabbitMQ restart cannot leave the
+        # process alive with a permanently closed channel or heartbeat task.
+        worker = WorkflowMQWorker()
         try:
-            await worker.stop()
+            if not await start_worker_or_stop(worker, stop_event):
+                break
+            logger.info("Worker started; waiting for messages")
+            await stop_event.wait()
+        except Exception as exc:  # noqa: BLE001
+            if stop_event.is_set():
+                break
+            logger.warning(
+                "Worker connection or consumer setup failed; retrying in %.1fs: %s",
+                reconnect_delay,
+                exc,
+            )
+            try:
+                await asyncio.wait_for(stop_event.wait(), timeout=reconnect_delay)
+            except asyncio.TimeoutError:
+                pass
         finally:
-            logger.info("Worker service stopped")
+            await worker.stop()
+
+    logger.info("Worker service stopped")
 
 
 def main() -> None:

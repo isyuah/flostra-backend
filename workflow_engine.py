@@ -408,7 +408,14 @@ async def run_workflow(
             await emit(
                 WorkflowEvent(
                     event="workflow_completed",
-                    data={"runId": run_id, "status": "error"},
+                    # Keep the terminal event self-contained. The Go control
+                    # plane persists this reason after the short Redis replay
+                    # window expires, while older consumers can ignore it.
+                    data={
+                        "runId": run_id,
+                        "status": "error",
+                        "errorMessage": str(exc),
+                    },
                 )
             )
             return

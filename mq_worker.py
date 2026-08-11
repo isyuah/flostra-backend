@@ -36,6 +36,14 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
+def _positive_float_env(name: str, default: float) -> float:
+    """读取正浮点环境变量，错误配置时保留一个可工作的最小周期。"""
+    try:
+        return max(float(os.getenv(name, str(default))), 0.1)
+    except (TypeError, ValueError):
+        return default
+
+
 def _first_non_null(*values: Any) -> Any:
     """返回第一个非 None 的值。"""
     for v in values:
@@ -153,6 +161,7 @@ def generate_worker_name(queue: str, worker_id: str) -> str:
 @dataclass
 class ParsedRunTask:
     execution_id: str
+    attempt_id: Optional[str]
     spec: RunWorkflowSpec
     workflow_meta: Dict[str, Any]
     secrets: Dict[str, str]  # New field
@@ -162,30 +171,51 @@ class ParsedRunTask:
 class MQEventEmitter:
     """将 workflow 事件写回 RabbitMQ 队列，附带 sequenceId。"""
 
-    def __init__(self, channel: aio_pika.abc.AbstractChannel, result_queue: str, execution_id: str) -> None:
+    def __init__(
+        self,
+        channel: aio_pika.abc.AbstractChannel,
+        result_queue: str,
+        execution_id: str,
+        attempt_id: Optional[str] = None,
+        worker_id: Optional[str] = None,
+    ) -> None:
         self._channel = channel
         self._result_queue = result_queue
         self._execution_id = execution_id
+        self._attempt_id = attempt_id
+        self._worker_id = worker_id
         self._sequence = 0
+        self._publish_lock = asyncio.Lock()
 
     async def emit(self, event: WorkflowEvent) -> None:
-        payload = {
-            "executionId": self._execution_id,
-            "sequenceId": self._sequence,
-            "event": event.event,
-            "data": event.data,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-        }
-        self._sequence += 1
+        # The execution heartbeat runs in a second coroutine. Keep sequence IDs
+        # and Rabbit publish order serialized, otherwise an async heartbeat can
+        # overtake workflow_completed and confuse replay consumers.
+        async with self._publish_lock:
+            payload = {
+                "executionId": self._execution_id,
+                "sequenceId": self._sequence,
+                "event": event.event,
+                "data": event.data,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }
+            if self._attempt_id:
+                payload["attemptId"] = self._attempt_id
+                payload["workerId"] = self._worker_id
+            self._sequence += 1
 
-        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-        message = Message(
-            body=body,
-            delivery_mode=DeliveryMode.NOT_PERSISTENT,
-            content_type="application/json",
-            content_encoding="utf-8",
-        )
-        await self._channel.default_exchange.publish(message, routing_key=self._result_queue)
+            body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+            message = Message(
+                body=body,
+                delivery_mode=DeliveryMode.NOT_PERSISTENT,
+                content_type="application/json",
+                content_encoding="utf-8",
+            )
+            await self._channel.default_exchange.publish(message, routing_key=self._result_queue)
+
+
+class ExecutionCancelled(Exception):
+    """由控制面写入的 Redis 取消标记触发的协作式终止。"""
 
 
 class WorkflowMQWorker:
@@ -214,6 +244,7 @@ class WorkflowMQWorker:
         self._redis_prefix = os.getenv("WORKER_REDIS_PREFIX", "worker")
         self._heartbeat_interval = float(os.getenv("WORKER_HEARTBEAT_SECONDS", "10"))
         self._heartbeat_ttl = int(os.getenv("WORKER_HEARTBEAT_TTL_SECONDS", "30"))
+        self._execution_heartbeat_interval = _positive_float_env("WORKER_EXECUTION_HEARTBEAT_SECONDS", 3.0)
         self._redis: Optional[aioredis.Redis] = None
         self._heartbeat_task: Optional[asyncio.Task] = None
         # 运行统计
@@ -230,8 +261,7 @@ class WorkflowMQWorker:
         if self._connection:
             return
         logger.info(
-            "Connecting to RabbitMQ: url=%s workerId=%s name=%s queue=%s",
-            self._url,
+            "Connecting to RabbitMQ: workerId=%s name=%s queue=%s",
             self._worker_id,
             self._worker_name,
             self._queue_in,
@@ -301,22 +331,60 @@ class WorkflowMQWorker:
         except Exception as exc:  # noqa: BLE001
             self._errors += 1
             execution_id = self._safe_execution_id(message)
+            attempt_id = self._safe_attempt_id(message)
             logger.exception("Failed to parse workflow task, executionId=%s: %s", execution_id, exc)
-            await self._publish_error(execution_id, str(exc))
+            await self._publish_error(execution_id, str(exc), attempt_id)
             await message.ack()
             return
 
-        base_emitter = MQEventEmitter(self._channel, self._queue_out, parsed.execution_id)
+        base_emitter = MQEventEmitter(
+            self._channel,
+            self._queue_out,
+            parsed.execution_id,
+            parsed.attempt_id,
+            self._worker_id,
+        )
+
+        if await self._is_cancellation_requested(parsed.execution_id):
+            # The Go control plane sets this key after the execution enters
+            # CANCEL_REQUESTED. A message may already be in this consumer's
+            # prefetch buffer, so RabbitMQ alone cannot make this race safe.
+            await self._publish_cancelled(base_emitter, parsed.execution_id)
+            await message.ack()
+            return
+
+        execution_heartbeat_stop = asyncio.Event()
+        execution_heartbeat_task: Optional[asyncio.Task] = None
+
+        async def stop_execution_heartbeat() -> None:
+            execution_heartbeat_stop.set()
+            if execution_heartbeat_task:
+                execution_heartbeat_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await execution_heartbeat_task
 
         async def counting_emit(event: WorkflowEvent) -> None:
             """拦截 workflow_completed 统计成功/失败后再转发。"""
+            nonlocal execution_heartbeat_task
+            # `run_workflow` emits between node transitions. This makes running
+            # cancellation cooperative: a long single-node operation finishes
+            # its current await before the worker can observe the marker.
+            if await self._is_cancellation_requested(parsed.execution_id):
+                raise ExecutionCancelled()
             if event.event == "workflow_completed":
                 status = (event.data or {}).get("status")
                 if status == "success":
                     self._success += 1
                 elif status == "error":
                     self._failed += 1
+                # Stop before publishing the terminal message. The emitter lock
+                # still preserves any already-started heartbeat ahead of it.
+                execution_heartbeat_stop.set()
             await base_emitter.emit(event)
+            if event.event == "workflow_started" and parsed.attempt_id and execution_heartbeat_task is None:
+                execution_heartbeat_task = asyncio.create_task(
+                    self._execution_heartbeat_loop(base_emitter, execution_heartbeat_stop, parsed.execution_id)
+                )
 
         logger.info(
             "Run begin: executionId=%s nodes=%d edges=%d entry=%s targets=%s",
@@ -351,9 +419,14 @@ class WorkflowMQWorker:
                 context=engine_context,
             )
             logger.info("Run finished: executionId=%s", parsed.execution_id)
+        except ExecutionCancelled:
+            logger.info("Workflow execution canceled: executionId=%s", parsed.execution_id)
+            await stop_execution_heartbeat()
+            await self._publish_cancelled(base_emitter, parsed.execution_id)
         except Exception as exc:  # noqa: BLE001
             self._errors += 1
             logger.exception("Workflow execution failed, executionId=%s", parsed.execution_id)
+            await stop_execution_heartbeat()
             await base_emitter.emit(
                 WorkflowEvent(
                     event="workflow_completed",
@@ -365,6 +438,7 @@ class WorkflowMQWorker:
                 )
             )
         finally:
+            await stop_execution_heartbeat()
             duration_ms = (monotonic() - start_ts) * 1000
             self._update_ewma(duration_ms)
             self._last_execution_at = datetime.now(timezone.utc).isoformat()
@@ -382,6 +456,13 @@ class WorkflowMQWorker:
         execution_id = payload.get("executionId")
         if not execution_id:
             raise ValueError("executionId is required")
+
+        attempt_id = payload.get("attemptId")
+        if attempt_id is not None:
+            try:
+                attempt_id = str(uuid.UUID(str(attempt_id)))
+            except (TypeError, ValueError) as exc:
+                raise ValueError("attemptId must be a UUID") from exc
 
         workflow = payload.get("workflow") or {}
         workflow_meta: Dict[str, Any] = {
@@ -407,6 +488,7 @@ class WorkflowMQWorker:
 
         return ParsedRunTask(
             execution_id=str(execution_id),
+            attempt_id=attempt_id,
             spec=spec,
             workflow_meta=workflow_meta,
             secrets=secrets,
@@ -420,10 +502,18 @@ class WorkflowMQWorker:
         except Exception:
             return "unknown"
 
-    async def _publish_error(self, execution_id: str, error_message: str) -> None:
+    def _safe_attempt_id(self, message: IncomingMessage) -> Optional[str]:
+        try:
+            raw = json.loads(message.body.decode("utf-8"))
+            value = raw.get("attemptId")
+            return str(uuid.UUID(str(value))) if value else None
+        except Exception:
+            return None
+
+    async def _publish_error(self, execution_id: str, error_message: str, attempt_id: Optional[str] = None) -> None:
         if not self._channel:
             return
-        emitter = MQEventEmitter(self._channel, self._queue_out, execution_id)
+        emitter = MQEventEmitter(self._channel, self._queue_out, execution_id, attempt_id, self._worker_id)
         await emitter.emit(
             WorkflowEvent(
                 event="workflow_completed",
@@ -434,6 +524,60 @@ class WorkflowMQWorker:
                 },
             )
         )
+
+    async def _publish_cancelled(self, emitter: MQEventEmitter, execution_id: str) -> None:
+        await emitter.emit(
+            WorkflowEvent(
+                event="workflow_completed",
+                data={
+                    "runId": execution_id,
+                    "status": "cancelled",
+                },
+            )
+        )
+
+    async def _execution_heartbeat_loop(
+        self,
+        emitter: MQEventEmitter,
+        stop_event: asyncio.Event,
+        execution_id: str,
+    ) -> None:
+        """续租一个已开始的 attempt；旧任务没有 attemptId 时不会启动该协程。"""
+        try:
+            while not stop_event.is_set():
+                try:
+                    await asyncio.wait_for(stop_event.wait(), timeout=self._execution_heartbeat_interval)
+                    continue
+                except asyncio.TimeoutError:
+                    pass
+                if stop_event.is_set():
+                    continue
+                await emitter.emit(
+                    WorkflowEvent(
+                        event="workflow_heartbeat",
+                        data={"runId": execution_id},
+                    )
+                )
+        except asyncio.CancelledError:
+            return
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Execution heartbeat failed for %s: %s", execution_id, exc)
+
+    def _cancellation_key(self, execution_id: str) -> str:
+        # Keep this key byte-for-byte aligned with gback/internal/execution.
+        return f"execution:{execution_id}:cancel-requested"
+
+    async def _is_cancellation_requested(self, execution_id: str) -> bool:
+        if not self._redis:
+            return False
+        try:
+            return bool(await self._redis.get(self._cancellation_key(execution_id)))
+        except Exception as exc:  # noqa: BLE001
+            # Redis outages must not turn healthy workflow work into failures.
+            # The control plane reports cancellation unavailable before it marks
+            # an execution CANCEL_REQUESTED, so this is only a degraded worker.
+            logger.warning("Unable to check cancellation marker for %s: %s", execution_id, exc)
+            return False
 
     def _update_ewma(self, duration_ms: float) -> None:
         if duration_ms < 0:

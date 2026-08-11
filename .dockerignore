@@ -1,0 +1,8 @@
+# The worker image copies only its runtime source, but exclusions also keep
+# local credentials and virtual environments out of the Docker build context.
+.env
+.venv/
+.git/
+__pycache__/
+*.py[cod]
+exported/
