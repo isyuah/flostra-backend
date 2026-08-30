@@ -18,5 +18,6 @@ RUN uv sync --frozen --no-dev --no-install-project
 # image, while all Python modules reachable from the worker remain available.
 COPY *.py ./
 COPY nodes ./nodes
+COPY security ./security
 
 CMD ["uv", "run", "--no-sync", "python", "worker_main.py"]

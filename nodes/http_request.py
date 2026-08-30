@@ -52,6 +52,52 @@ class HttpRequestNode(WorkflowNode):
         }
 
     @classmethod
+    def _normalize_extras(cls, extras_raw: Any) -> tuple[dict, dict, str | None]:
+        """把 extras（headers/query/auth）规整为独立字典，避免把非字符串值塞进 header。"""
+        headers: dict = {}
+        query: dict = {}
+        auth_header: str | None = None
+        if not isinstance(extras_raw, dict):
+            return headers, query, auth_header
+        extras = extras_raw
+        raw_headers = extras.get("headers")
+        if isinstance(raw_headers, dict):
+            for k, v in raw_headers.items():
+                if v is not None:
+                    headers[str(k)] = str(v)
+        raw_query = extras.get("query")
+        if isinstance(raw_query, dict):
+            for k, v in raw_query.items():
+                if v is not None:
+                    query[str(k)] = v
+        auth = extras.get("auth")
+        if isinstance(auth, dict) and auth.get("token"):
+            auth_header = f"Bearer {auth['token']}"
+        elif isinstance(auth, str) and auth:
+            auth_header = auth
+        return headers, query, auth_header
+
+    @classmethod
+    def _parse_timeout(cls, raw: Any) -> float:
+        try:
+            value = float(raw) if raw is not None else 30.0
+        except (TypeError, ValueError):
+            value = 30.0
+        return max(0.1, min(value, 300.0))
+
+    @classmethod
+    def _parse_retry(cls, raw: Any) -> int:
+        try:
+            value = int(raw) if raw is not None else 0
+        except (TypeError, ValueError):
+            value = 0
+        return max(0, min(value, 10))
+
+    @classmethod
+    def _retriable_statuses(cls) -> set[int]:
+        return {408, 429, 500, 502, 503, 504}
+
+    @classmethod
     async def run(cls, inputs: JsonDict, params: JsonDict, context: JsonDict = None) -> JsonDict:
         method = (inputs.get("method") or "GET").upper()
         url = inputs.get("url")
