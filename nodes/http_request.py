@@ -10,6 +10,7 @@ import httpx
 from .base import JsonDict, WorkflowNode, register_node
 from io_utils import FileIoService
 from runtime_files import is_file_ref
+from security.egress import EgressError, check_outbound_url
 
 
 @register_node
@@ -56,7 +57,7 @@ class HttpRequestNode(WorkflowNode):
         url = inputs.get("url")
         if not url:
             raise ValueError("HTTP 请求节点缺少 URL（请在输入端口 url 提供）")
-        
+
         if not context:
             raise ValueError("HTTP节点需要运行时上下文")
 
@@ -68,6 +69,10 @@ class HttpRequestNode(WorkflowNode):
         timeout = cls._parse_timeout(params.get("timeout"))
         retry = cls._parse_retry(params.get("retry"))
         resp: Optional[httpx.Response] = None
+
+        # 出站网络策略：首跳 URL 必须通过校验；重定向后的最终 URL 会在
+        # 响应返回后再次校验，防止 DNS rebinding / 跳入内网。
+        check_outbound_url(url)
 
         json_body: Any = None
         data_body: Any = None
@@ -81,38 +86,31 @@ class HttpRequestNode(WorkflowNode):
                 files_to_process = files_input
             elif isinstance(files_input, dict):
                 files_to_process = [files_input]
-            
+
             for f in files_to_process:
                 if is_file_ref(f):
                     content, filename, mime = await FileIoService.get_file_bytes(context, f)
-                    # httpx files format: (field_name, (filename, content, mime_type))
-                    # Default field name to 'file' if generic list, or use name from ref if possible?
-                    # For now use 'file' as key. If user needs specific keys, they might need a more complex input structure.
                     multipart_files.append(("file", (filename, content, mime)))
-            
+
             if not multipart_files:
-                multipart_files = None # No valid files found
+                multipart_files = None
 
         # 如果有文件，Body通常作为 form data
         if multipart_files:
             data_body = {}
             if isinstance(body, dict):
-                 # Flatten body for data fields in multipart
-                 for k, v in body.items():
-                     if isinstance(v, (str, int, float, bool)):
-                         data_body[k] = str(v)
-                     else:
-                         data_body[k] = json.dumps(v)
+                for k, v in body.items():
+                    if isinstance(v, (str, int, float, bool)):
+                        data_body[k] = str(v)
+                    else:
+                        data_body[k] = json.dumps(v)
             elif body is not None:
-                # If body is string, ignore or try to use? 
-                pass 
-            
-            # Remove Content-Type if set, let httpx set boundary
+                pass
+
             if "Content-Type" in headers:
                 headers.pop("Content-Type")
-                
+
         else:
-            # Normal Body Processing
             if isinstance(body, (dict, list)):
                 json_body = body
             elif body is not None:
@@ -135,12 +133,17 @@ class HttpRequestNode(WorkflowNode):
                         data=data_body,
                         files=multipart_files,
                     )
+                # httpx 跟随重定向后，最终响应可能指向内网地址，必须复检。
+                if str(resp.url) != url:
+                    check_outbound_url(str(resp.url))
                 status = resp.status_code
                 if status in cls._retriable_statuses() and attempt < retry:
                     attempt += 1
                     await asyncio.sleep(0.5)
                     continue
                 break
+            except EgressError:
+                raise
             except httpx.RequestError as exc:
                 last_err = exc
                 if attempt < retry:

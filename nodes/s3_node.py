@@ -13,11 +13,16 @@ from botocore.config import Config as BotoCoreConfig
 from .base import JsonDict, WorkflowNode, register_node
 from runtime_files import build_file_ref, upsert_file_record, get_file_record, new_file_id, is_file_ref
 from io_utils import FileIoService
+from security.egress import check_outbound_url
 
 
 # Helper to create an S3 client
 async def _get_s3_client(conn_cfg: Dict[str, Any]):
     session = get_session()
+    endpoint = conn_cfg.get("endpoint_url")
+    if endpoint:
+        # 出站网络策略：S3 端点必须通过校验，防止指向内网对象存储。
+        check_outbound_url(endpoint)
     config = BotoCoreConfig(
         signature_version="s3v4",
         retries={"max_attempts": 10, "mode": "standard"},

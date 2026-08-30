@@ -9,6 +9,7 @@ from aiobotocore.session import get_session
 from botocore.config import Config as BotoCoreConfig
 
 from runtime_files import get_file_record, is_file_ref
+from security.egress import check_outbound_url
 
 JsonDict = Dict[str, Any]
 
@@ -24,7 +25,7 @@ class FileIoService:
     async def get_file_bytes(cls, ctx: JsonDict, file_ref: JsonDict) -> Tuple[bytes, str, Optional[str]]:
         """
         获取文件的完整二进制内容。
-        
+
         Returns:
             (content_bytes, filename, mime_type)
         """
@@ -54,11 +55,11 @@ class FileIoService:
             meta = ref_data.get("meta")
             if meta and meta.get("bucket") and meta.get("key"):
                 return await cls._read_s3_bytes(meta), filename, mime
-            
+
         # 3. URL Reference (Public or Presigned)
         url = ref_data.get("url")
         if url:
-             return await cls._read_http_bytes(url), filename, mime
+            return await cls._read_http_bytes(url), filename, mime
 
         raise ValueError(f"Unable to resolve content for file: {file_id} (source={source})")
 
@@ -66,12 +67,12 @@ class FileIoService:
     async def get_file_stream(cls, ctx: JsonDict, file_ref: JsonDict) -> Tuple[AsyncIterator[bytes], str, Optional[str], Optional[int]]:
         """
         获取文件的异步读取流。
-        
+
         Returns:
             (async_stream_iterator, filename, mime_type, size)
         """
         if not is_file_ref(file_ref):
-             raise ValueError("Input is not a valid file reference")
+            raise ValueError("Input is not a valid file reference")
 
         file_id = file_ref.get("id")
         record = get_file_record(ctx, file_id) if file_id else None
@@ -82,7 +83,7 @@ class FileIoService:
         size = ref_data.get("size")
         if size is not None:
             size = int(size)
-        
+
         source = ref_data.get("source")
 
         # 1. Base64 Inline (Wrap in async iterator)
@@ -102,12 +103,10 @@ class FileIoService:
         # 3. URL Reference
         url = ref_data.get("url")
         if url:
-             # TODO: Implement HTTP stream
-             # For now, fallback to reading bytes and yielding
-             data = await cls._read_http_bytes(url)
-             async def _iter_url():
+            data = await cls._read_http_bytes(url)
+            async def _iter_url():
                 yield data
-             return _iter_url(), filename, mime, len(data)
+            return _iter_url(), filename, mime, len(data)
 
         raise ValueError(f"Unable to resolve stream for file: {file_id}")
 
@@ -115,8 +114,13 @@ class FileIoService:
 
     @staticmethod
     async def _read_http_bytes(url: str) -> bytes:
+        # 出站网络策略：文件下载同样必须通过校验。
+        check_outbound_url(url)
         async with httpx.AsyncClient() as client:
-            resp = await client.get(url)
+            resp = await client.get(url, follow_redirects=True)
+            # 重定向后目标可能指向内网，必须复检。
+            if str(resp.url) != url:
+                check_outbound_url(str(resp.url))
             resp.raise_for_status()
             return resp.content
 
@@ -139,7 +143,7 @@ class FileIoService:
         }
         # 过滤 None 值，避免 boto3 报错
         client_kwargs = {k: v for k, v in client_kwargs.items() if v is not None}
-        
+
         return session.create_client("s3", **client_kwargs)
 
     @classmethod
@@ -148,6 +152,11 @@ class FileIoService:
         key = meta.get("key")
         if not bucket or not key:
             raise ValueError("Incomplete S3 metadata")
+
+        # S3 endpoint 出站校验：允许配置的 S3 端点，但必须通过策略。
+        endpoint = meta.get("endpoint_url") or meta.get("endpoint")
+        if endpoint:
+            check_outbound_url(endpoint)
 
         async with await cls._create_s3_client(meta) as client:
             response = await client.get_object(Bucket=bucket, Key=key)
@@ -158,14 +167,14 @@ class FileIoService:
     async def _get_s3_stream(cls, meta: Dict[str, Any]) -> AsyncIterator[bytes]:
         bucket = meta.get("bucket")
         key = meta.get("key")
-        
+
         # 注意: 这里返回的 stream 依赖 client 的上下文。
         # 正确的做法应该让调用者管理 client 生命周期，或者使用 smart stream wrapper。
         # 为简化 MVP，这里暂时使用一次性读取 (TODO: 优化为真正的流式透传)
         # 实际上 aiobotocore 的 stream 在 client 关闭后可能不可读。
         # 这种实现是不完美的，对于极大文件会有问题。
         # 更好的实现是返回一个 context manager。
-        
+
         # 临时方案：先读进内存再 yield (这就退化了，但安全)。
         # 真正的流式传输需要重构 Service 接口以支持 Context Manager。
         data = await cls._read_s3_bytes(meta)

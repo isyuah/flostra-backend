@@ -8,6 +8,7 @@ from typing import Any, Dict, Optional
 import asyncssh
 
 from .base import JsonDict, WorkflowNode, register_node
+from security.egress import check_outbound_host
 
 
 def _to_str_limit(text: str, limit: int = 1_000_000) -> str:
@@ -136,6 +137,9 @@ class SSHNode(WorkflowNode):
         ignore_host_key = params.get("ignoreHostKey", False)
         fail_on_nonzero = bool(fail_on_nonzero)
         ignore_host_key = bool(ignore_host_key)
+
+        # 出站网络策略：SSH 目标主机必须通过校验，防止连接内网主机。
+        check_outbound_host(host, port)
 
         password = inputs.get("password") or params.get("password")
         private_key = inputs.get("privateKey") or params.get("privateKey")

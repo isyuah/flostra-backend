@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import json
 from typing import Any, Dict, Union
+from urllib.parse import urlparse
 
 import redis.asyncio as redis
+
 from .base import JsonDict, WorkflowNode, register_node
+from security.egress import check_outbound_host
 
 
 @register_node
@@ -59,13 +62,13 @@ class RedisNode(WorkflowNode):
     async def run(cls, inputs: JsonDict, params: JsonDict, context: JsonDict = None) -> JsonDict:
         action = str(inputs.get("action") or "GET").upper()
         key = str(inputs.get("key") or "")
-        
+
         # 处理连接信息
         conn_input = inputs.get("connection")
-        client_kwargs = {}
-        
+        client_kwargs: Dict[str, Any] = {}
+
         url = None
-        
+
         if isinstance(conn_input, str) and conn_input.startswith("redis"):
             url = conn_input
         elif isinstance(conn_input, dict):
@@ -76,13 +79,19 @@ class RedisNode(WorkflowNode):
             if conn_input.get("db") is not None:
                 client_kwargs["db"] = int(conn_input.get("db"))
         else:
-             # Default fallback
-             client_kwargs["host"] = "localhost"
-             client_kwargs["port"] = 6379
+            client_kwargs["host"] = "localhost"
+            client_kwargs["port"] = 6379
+
+        # 出站网络策略：Redis 目标必须通过校验。
+        if url:
+            _parsed = urlparse(url)
+            check_outbound_host(_parsed.hostname or "", _parsed.port or 6379)
+        else:
+            check_outbound_host(str(client_kwargs.get("host") or "localhost"), int(client_kwargs.get("port") or 6379))
 
         # 建立连接
         if url:
-             client = redis.from_url(url, decode_responses=True, socket_connect_timeout=5.0)
+            client = redis.from_url(url, decode_responses=True, socket_connect_timeout=5.0)
         else:
             client = redis.Redis(
                 decode_responses=True,
@@ -96,12 +105,10 @@ class RedisNode(WorkflowNode):
                 result = await client.get(key)
             elif action == "SET":
                 val = inputs.get("value")
-                # 如果是 dict/list，自动转 JSON 存储
                 if isinstance(val, (dict, list)):
                     val = json.dumps(val, ensure_ascii=False)
                 elif val is None:
                     val = ""
-                # 如果 val 是数字等，redis-py 会处理，或者转str
                 result = await client.set(key, val)
             elif action == "DEL":
                 result = await client.delete(key)
@@ -112,7 +119,7 @@ class RedisNode(WorkflowNode):
             elif action == "EXPIRE":
                 seconds = inputs.get("value")
                 try:
-                    sec_int = int(seconds) # type: ignore
+                    sec_int = int(seconds)  # type: ignore
                     result = await client.expire(key, sec_int)
                 except (ValueError, TypeError):
                     result = False

@@ -25,6 +25,7 @@ from workflow_engine import (
     WorkflowNodeDTO,
     run_workflow,
 )
+from security.event_safety import sanitize_event_data, serialize_event_payload
 
 logger = logging.getLogger(__name__)
 
@@ -83,7 +84,9 @@ def _build_spec_from_graph(graph: Dict[str, Any]) -> RunWorkflowSpec:
         node_id = n.get("id")
         node_type = _node_type(n)
         if not node_id or not node_type:
-            continue  # 跳过不合法节点
+            # fail-closed：非法节点不再静默跳过，避免图在 worker 端被悄悄
+            # 改变语义（例如节点缺失导致下游收到不完整输入）。
+            raise ValueError(f"workflow graph contains a node without id/type: {n!r}")
         node_dtos.append(
             WorkflowNodeDTO(
                 id=node_id,
@@ -104,7 +107,8 @@ def _build_spec_from_graph(graph: Dict[str, Any]) -> RunWorkflowSpec:
         src = _first_non_null(e.get("source"), e.get("sourceNodeId"), e.get("source_node_id"))
         tgt = _first_non_null(e.get("target"), e.get("targetNodeId"), e.get("target_node_id"))
         if not edge_id or not src or not tgt:
-            continue
+            # fail-closed：非法边不再静默跳过，避免图在 worker 端被悄悄改语义。
+            raise ValueError(f"workflow graph contains an edge without id/source/target: {e!r}")
         edge_dtos.append(
             WorkflowEdgeDTO(
                 id=edge_id,
@@ -178,12 +182,14 @@ class MQEventEmitter:
         execution_id: str,
         attempt_id: Optional[str] = None,
         worker_id: Optional[str] = None,
+        secret_values: Optional[Dict[str, str]] = None,
     ) -> None:
         self._channel = channel
         self._result_queue = result_queue
         self._execution_id = execution_id
         self._attempt_id = attempt_id
         self._worker_id = worker_id
+        self._secret_values = secret_values
         self._sequence = 0
         self._publish_lock = asyncio.Lock()
 
@@ -192,11 +198,12 @@ class MQEventEmitter:
         # and Rabbit publish order serialized, otherwise an async heartbeat can
         # overtake workflow_completed and confuse replay consumers.
         async with self._publish_lock:
+            data = sanitize_event_data(event.data, self._secret_values)
             payload = {
                 "executionId": self._execution_id,
                 "sequenceId": self._sequence,
                 "event": event.event,
-                "data": event.data,
+                "data": data,
                 "timestamp": datetime.now(timezone.utc).isoformat(),
             }
             if self._attempt_id:
@@ -204,10 +211,10 @@ class MQEventEmitter:
                 payload["workerId"] = self._worker_id
             self._sequence += 1
 
-            body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+            body = serialize_event_payload(payload)
             message = Message(
                 body=body,
-                delivery_mode=DeliveryMode.NOT_PERSISTENT,
+                delivery_mode=DeliveryMode.PERSISTENT,
                 content_type="application/json",
                 content_encoding="utf-8",
             )
@@ -343,6 +350,7 @@ class WorkflowMQWorker:
             parsed.execution_id,
             parsed.attempt_id,
             self._worker_id,
+            parsed.secrets,
         )
 
         if await self._is_cancellation_requested(parsed.execution_id):
@@ -355,6 +363,7 @@ class WorkflowMQWorker:
 
         execution_heartbeat_stop = asyncio.Event()
         execution_heartbeat_task: Optional[asyncio.Task] = None
+        terminal_delivered = False
 
         async def stop_execution_heartbeat() -> None:
             execution_heartbeat_stop.set()
@@ -365,7 +374,7 @@ class WorkflowMQWorker:
 
         async def counting_emit(event: WorkflowEvent) -> None:
             """拦截 workflow_completed 统计成功/失败后再转发。"""
-            nonlocal execution_heartbeat_task
+            nonlocal execution_heartbeat_task, terminal_delivered
             # `run_workflow` emits between node transitions. This makes running
             # cancellation cooperative: a long single-node operation finishes
             # its current await before the worker can observe the marker.
@@ -381,6 +390,9 @@ class WorkflowMQWorker:
                 # still preserves any already-started heartbeat ahead of it.
                 execution_heartbeat_stop.set()
             await base_emitter.emit(event)
+            if event.event == "workflow_completed":
+                # 终态事件成功发布后才允许 ack 输入任务。
+                terminal_delivered = True
             if event.event == "workflow_started" and parsed.attempt_id and execution_heartbeat_task is None:
                 execution_heartbeat_task = asyncio.create_task(
                     self._execution_heartbeat_loop(base_emitter, execution_heartbeat_stop, parsed.execution_id)
@@ -423,6 +435,7 @@ class WorkflowMQWorker:
             logger.info("Workflow execution canceled: executionId=%s", parsed.execution_id)
             await stop_execution_heartbeat()
             await self._publish_cancelled(base_emitter, parsed.execution_id)
+            terminal_delivered = True
         except Exception as exc:  # noqa: BLE001
             self._errors += 1
             logger.exception("Workflow execution failed, executionId=%s", parsed.execution_id)
@@ -437,6 +450,7 @@ class WorkflowMQWorker:
                     },
                 )
             )
+            terminal_delivered = True
         finally:
             await stop_execution_heartbeat()
             duration_ms = (monotonic() - start_ts) * 1000
@@ -445,7 +459,17 @@ class WorkflowMQWorker:
             self._inflight = max(0, self._inflight - 1)
             logger.info("Run end: executionId=%s duration_ms=%.2f", parsed.execution_id, duration_ms)
             await self._publish_heartbeat(force=True)
-            await message.ack()
+            # 终态事件发布失败（broker 不可用、事件超限等）时 NACK 重投，
+            # 让 broker 重新投递任务；成功才 ack。这样执行结果不会因为
+            # 发布失败而永久丢失。
+            if terminal_delivered:
+                await message.ack()
+            else:
+                logger.warning(
+                    "Terminal event delivery failed for executionId=%s; nacking for redelivery",
+                    parsed.execution_id,
+                )
+                await message.nack(requeue=True)
 
     def _parse_task(self, message: IncomingMessage) -> ParsedRunTask:
         if not message.body:

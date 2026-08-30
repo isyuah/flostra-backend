@@ -6,6 +6,7 @@ import io
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Type
 
+from security.egress import check_outbound_url
 
 @dataclass
 class LLMContext:
@@ -312,13 +313,13 @@ class HttpToolPlugin(WorkflowPlugin):
         import httpx
         import urllib.parse
 
-        allowed = set(self.config.get("allowed_hosts") or [])
-        timeout = float(self.config.get("timeout") or 8)
-
         def _check_host(url: str) -> None:
             host = urllib.parse.urlparse(url).hostname or ""
             if host not in allowed:
                 raise ValueError(f"host not allowed: {host}")
+            # 出站网络策略：白名单命中后仍须通过 egress 校验，
+            # 防止白名单域名解析到内网地址或配置了内网域名。
+            check_outbound_url(url)
 
         async def _http_get(url: str, headers: Optional[Dict[str, str]] = None, params: Optional[Dict[str, Any]] = None) -> Any:
             _check_host(url)

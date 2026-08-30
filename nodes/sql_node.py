@@ -5,11 +5,13 @@ import decimal
 import json
 import uuid
 from typing import Any, Dict, List, Union
+from urllib.parse import urlparse
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from .base import JsonDict, WorkflowNode, register_node
+from security.egress import check_outbound_host
 
 
 def _json_serializer(obj: Any) -> Any:
@@ -21,7 +23,6 @@ def _json_serializer(obj: Any) -> Any:
     if isinstance(obj, uuid.UUID):
         return str(obj)
     if isinstance(obj, bytes):
-        # 对于二进制数据，无法直接 JSON 化，简单转为 repr 或者忽略
         return "<binary>"
     raise TypeError(f"Type {type(obj)} not serializable")
 
@@ -88,12 +89,14 @@ class SqlNode(WorkflowNode):
 
         # 简单的 DSN 校验/补全 (仅针对 PG)
         if not dsn.startswith("postgresql"):
-             # 如果用户只写了 postgres://，SQLAlchemy 异步需要 postgresql+asyncpg://
-             # 或者让用户自己负责。为了易用性，尝试修正常见前缀。
-             if dsn.startswith("postgres://"):
-                 dsn = dsn.replace("postgres://", "postgresql+asyncpg://", 1)
-             elif dsn.startswith("postgresql://") and "+asyncpg" not in dsn:
-                 dsn = dsn.replace("postgresql://", "postgresql+asyncpg://", 1)
+            if dsn.startswith("postgres://"):
+                dsn = dsn.replace("postgres://", "postgresql+asyncpg://", 1)
+            elif dsn.startswith("postgresql://") and "+asyncpg" not in dsn:
+                dsn = dsn.replace("postgresql://", "postgresql+asyncpg://", 1)
+
+        # 出站网络策略：数据库目标必须通过校验。
+        _parsed = urlparse(dsn)
+        check_outbound_host(_parsed.hostname or "", _parsed.port)
 
         # 创建引擎 (每次创建销毁对于连接池不是最佳实践，但适合 Serverless/Stateless Worker)
         # 生产环境应当在 Worker 启动时维护全局 Engine Map。
@@ -102,31 +105,26 @@ class SqlNode(WorkflowNode):
 
         try:
             async with engine.begin() as conn:
-                # 使用 text() 构造 SQL，支持 :param
                 stmt = text(sql_raw)
-                
-                # 执行
+
                 result = await conn.execute(stmt, parameters)
-                
+
                 row_count = result.rowcount
                 rows: List[Dict[str, Any]] = []
 
-                # 如果有返回结果集 (SELECT / RETURNING)
                 if result.returns_rows:
                     keys = result.keys()
-                    # 转换 Row 对象为 Dict，并处理 JSON 序列化
                     for row in result.all():
                         row_dict = {}
                         for idx, key in enumerate(keys):
                             val = row[idx]
-                            # 预处理一些常见的非 JSON 类型
                             if isinstance(val, (datetime.datetime, datetime.date, decimal.Decimal, uuid.UUID)):
                                 val = _json_serializer(val)
                             row_dict[key] = val
                         rows.append(row_dict)
-                
+
                 return {"rows": rows, "row_count": row_count}
-        
+
         except Exception as e:
             raise ValueError(f"SQL 执行失败: {e}") from e
         finally:

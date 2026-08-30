@@ -4,7 +4,6 @@ from .base import JsonDict, WorkflowNode, get_all_node_schemas, get_node_cls, re
 from . import triggers  # noqa: F401
 from . import end_node  # noqa: F401
 from . import json_nodes  # noqa: F401
-from . import code_node  # noqa: F401
 from . import http_request  # noqa: F401
 from . import email_send  # noqa: F401
 from . import template_string  # noqa: F401

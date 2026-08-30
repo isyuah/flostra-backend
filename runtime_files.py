@@ -8,6 +8,8 @@ from urllib.parse import urlparse
 
 import httpx
 
+from security.egress import check_outbound_url
+
 JsonDict = Dict[str, Any]
 
 
@@ -40,7 +42,6 @@ def build_file_ref(
         ref["sha256"] = str(sha256)
     if source is not None:
         ref["source"] = str(source)
-    # 仅在无运行时上下文或显式需要 inline 时使用
     if content_base64 is not None:
         ref["content_base64"] = str(content_base64)
     return ref
@@ -127,6 +128,9 @@ async def download_url_bytes(url: str, *, max_bytes: int = 8_000_000) -> bytes:
     if parsed.scheme not in {"http", "https"}:
         raise ValueError("仅支持 http/https URL")
 
+    # 出站网络策略：下载目标必须通过校验。
+    check_outbound_url(url)
+
     try:
         max_bytes_int = int(max_bytes)
         if max_bytes_int <= 0:
@@ -138,6 +142,9 @@ async def download_url_bytes(url: str, *, max_bytes: int = 8_000_000) -> bytes:
     try:
         async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
             async with client.stream("GET", url) as resp:
+                # 重定向后的最终 URL 必须再次校验，防止跳入内网。
+                if str(resp.url) != url:
+                    check_outbound_url(str(resp.url))
                 resp.raise_for_status()
                 buf = bytearray()
                 async for chunk in resp.aiter_bytes():

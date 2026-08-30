@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import json
 from typing import Any, Dict
+from urllib.parse import urlparse
 
 import aio_pika
+
 from .base import JsonDict, WorkflowNode, register_node
+from security.egress import check_outbound_host
 
 
 @register_node
@@ -54,6 +57,10 @@ class RabbitMQNode(WorkflowNode):
         if not conn_str:
             raise ValueError("RabbitMQ 连接字符串不能为空")
 
+        # 出站网络策略：RabbitMQ broker 目标必须通过校验。
+        _parsed = urlparse(conn_str)
+        check_outbound_host(_parsed.hostname or "", _parsed.port or 5672)
+
         # 优先使用 exchange + routing_key
         # 如果没有 exchange，尝试使用 queue 作为 routing_key (default exchange)
         exchange_name = inputs.get("exchange") or ""
@@ -80,7 +87,7 @@ class RabbitMQNode(WorkflowNode):
         # 处理额外选项
         opts = inputs.get("options") or {}
         headers = opts.get("headers")
-        delivery_mode = opts.get("delivery_mode") # 1: Transient, 2: Persistent
+        delivery_mode = opts.get("delivery_mode")  # 1: Transient, 2: Persistent
 
         try:
             connection = await aio_pika.connect_robust(conn_str)

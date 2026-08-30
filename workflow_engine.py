@@ -178,6 +178,7 @@ def _merge_inputs_for_node(
     node: WorkflowNodeDTO,
     in_edges_data: Dict[str, List[WorkflowEdgeDTO]],
     context_outputs: Dict[str, JsonDict],
+    port_constants: Optional[JsonDict] = None,
 ) -> JsonDict:
     """
     汇总某个节点的输入：
@@ -187,8 +188,9 @@ def _merge_inputs_for_node(
     inputs: JsonDict = {}
 
     # 1) 先用常量端口作为默认值
-    if node.port_constants:
-        inputs.update(node.port_constants)
+    constants = port_constants if port_constants is not None else node.port_constants
+    if constants:
+        inputs.update(constants)
 
     # 2) 再用连线覆盖：有上游时，以上游为准
     for edge in in_edges_data.get(node_id, []):
@@ -208,7 +210,8 @@ async def run_workflow(
     """
     执行整张工作流：
     - 先拓扑排序
-    - 按顺序执行每个节点
+    - 就绪节点并发执行（互不依赖的节点并行），事件仍按拓扑序发布
+    - 支持节点级 retryPolicy（对可重试异常做指数退避重试）
     - 通过 emit 回调把事件抛给外层（通常是 SSE）
     """
     graph = _build_graph(spec)
@@ -228,6 +231,8 @@ async def run_workflow(
 
     context_outputs: Dict[str, JsonDict] = {}
     control_fired: set[str] = set()  # 已触发的控制边 ID
+    failed_node: Optional[str] = None
+    failure_message: Optional[str] = None
 
     def should_skip_node(node_id: str) -> bool:
         ctl_in_edges = in_edges_ctl.get(node_id, [])
@@ -265,25 +270,20 @@ async def run_workflow(
     reachable: set[str]
 
     if not spec.entry_nodes:
-        # 优先使用“触发器”类型作为默认入口，避免无边的业务节点被误当作起点执行
         trigger_entries = [nid for nid in graph["source_nodes"] if node_map[nid].type.startswith("trigger.")]
         if trigger_entries:
             default_entries = trigger_entries
             if not (context or {}).get("request"):
                 default_entries = [nid for nid in default_entries if node_map[nid].type != "trigger.http"]
         else:
-            # 无触发器时才退回到所有入度为 0 的节点
             default_entries = [nid for nid in graph["source_nodes"]]
 
-        # 如果过滤后为空，则保持空入口（视为不执行任何节点）
         if default_entries:
             spec.entry_nodes = default_entries
-    
+
     if spec.entry_nodes is not None and len(spec.entry_nodes) == 0:
-        # 显式空入口：不执行任何节点
         reachable = set()
     elif spec.entry_nodes:
-        # 显式（或刚刚推导出的）入口：只执行从这些入口可达的子图
         for nid in spec.entry_nodes:
             if nid not in node_map:
                 raise ValueError(f"entry node {nid!r} not found in workflow nodes")
@@ -298,133 +298,91 @@ async def run_workflow(
             for edge in out_edges_data.get(nid, []) + out_edges_ctl.get(nid, []):
                 queue.append(edge.target_node_id)
     else:
-        # 仍然没有入口，则整图执行
         reachable = all_nodes
 
     # 在全局拓扑序基础上过滤得到本次实际执行顺序
     effective_order: List[str] = [nid for nid in topo_order if nid in reachable]
 
-    # 触发全局开始事件，便于前端/上游观察运行状态
+    # 触发全局开始事件
     await emit(WorkflowEvent(event="workflow_started", data={"runId": run_id}))
 
-    for node_id in effective_order:
-        node = node_map[node_id]
+    # 并发调度：按拓扑序扫描，每轮收集“依赖已满足且尚未执行”的节点，
+    # 用 asyncio.gather 并行执行；事件发布仍按拓扑序串行，保证前端时序稳定。
+    remaining = set(effective_order)
+    while remaining and failed_node is None:
+        ready = [
+            nid for nid in effective_order
+            if nid in remaining and not should_skip_node(nid)
+        ]
+        if not ready:
+            # 没有任何节点可执行：剩余节点全部跳过
+            for nid in effective_order:
+                if nid in remaining:
+                    await emit(
+                        WorkflowEvent(
+                            event="node_skipped",
+                            data={"runId": run_id, "nodeId": nid, "reason": "no_input"},
+                        )
+                    )
+            remaining.clear()
+            break
 
-        if should_skip_node(node_id):
-            await emit(
-                WorkflowEvent(
-                    event="node_skipped",
-                    data={"runId": run_id, "nodeId": node_id, "reason": "no_input"},
+        async def run_one(node_id: str) -> None:
+            nonlocal failed_node, failure_message
+            node = node_map[node_id]
+            try:
+                await _execute_node(
+                    node_id=node_id,
+                    node=node,
+                    run_id=run_id,
+                    emit=emit,
+                    context=context,
+                    context_outputs=context_outputs,
+                    in_edges_data=in_edges_data,
+                    overrides_by_node=overrides_by_node,
+                    out_edges_ctl=out_edges_ctl,
+                    control_fired=control_fired,
                 )
-            )
-            continue
+            except NodeExecutionError as exc:
+                failed_node = node_id
+                failure_message = exc.message
+                raise
 
-        # 广播节点开始
+        # 并行执行本批就绪节点；任一失败即短路（gather 会等待其它任务完成，
+        # 但失败节点之后不会再调度新批次）。run_one 已在失败时设置
+        # failed_node/failure_message，这里只需吞掉已处理的 NodeExecutionError。
+        await asyncio.gather(
+            *(run_one(nid) for nid in ready),
+            return_exceptions=True,
+        )
+        for nid in ready:
+            remaining.discard(nid)
+
+    if failed_node is not None:
         await emit(
             WorkflowEvent(
-                event="node_started",
-                data={"runId": run_id, "nodeId": node_id},
+                event="node_completed",
+                data={
+                    "runId": run_id,
+                    "nodeId": failed_node,
+                    "status": "error",
+                    "errorMessage": failure_message or "node failed",
+                },
             )
         )
-
-        # 1) 汇总输入
-        base_inputs = _merge_inputs_for_node(
-            node_id=node_id,
-            node=node,
-            in_edges_data=in_edges_data,
-            context_outputs=context_outputs,
+        await emit(
+            WorkflowEvent(
+                event="workflow_completed",
+                data={
+                    "runId": run_id,
+                    "status": "error",
+                    "errorMessage": failure_message or "node failed",
+                },
+            )
         )
-        inputs = _apply_overrides(
-            node_id=node_id,
-            base_inputs=base_inputs,
-            overrides_by_node=overrides_by_node,
-        )
+        return
 
-        # 2) 解析 Secret (Replacement):
-        # 仅对 params 进行 [[ KEY ]] 替换，inputs 保持原样
-        secret_map = (context or {}).get("secrets")
-        safe_params = resolve_secrets_in_params(node.params, secret_map) if secret_map else node.params
-        safe_inputs = inputs  # Inputs do not support secret replacement
-
-        # 2.5) 注入运行上下文（只读），避免被 overrides 覆盖
-        # if context is not None:
-        #    safe_inputs["__context"] = context # DEPRECATED: Passed via arg now
-
-        # 3) 执行节点
-        try:
-            node_cls = get_node_cls(node.type)
-            # Pass context explicitly
-            outputs = await node_cls.run(safe_inputs, safe_params, context=context)
-
-            control_signals: Optional[Dict[str, bool]] = None
-            data_outputs: Any = outputs
-            if isinstance(outputs, dict):
-                cs_candidate = outputs.get("controlSignals")
-                if isinstance(cs_candidate, dict):
-                    control_signals = {
-                        k: bool(v) for k, v in cs_candidate.items()
-                    }
-                data_outputs = dict(outputs)
-                if "controlSignals" in data_outputs:
-                    data_outputs.pop("controlSignals")
-
-            context_outputs[node_id] = data_outputs
-
-            # 触发控制边：默认触发该节点所有控制输出；若提供 controlSignals，则只触发为 True 的端口
-            allowed_ports: Optional[set[str]] = None
-            if control_signals is not None:
-                allowed_ports = {pid for pid, flag in control_signals.items() if flag}
-            for e in out_edges_ctl.get(node_id, []):
-                if allowed_ports is None or e.source_port_id in allowed_ports:
-                    control_fired.add(e.id)
-
-            # 节点运行成功
-            await emit(
-                WorkflowEvent(
-                    event="node_completed",
-                    data={
-                        "runId": run_id,
-                        "nodeId": node_id,
-                        "status": "success",
-                        "inputValues": inputs,
-                        "outputValues": outputs,
-                    },
-                )
-            )
-        except Exception as exc:  # noqa: BLE001
-            # 节点失败时，整个 workflow 直接失败并结束
-            # 节点失败：短路整个 workflow
-            await emit(
-                WorkflowEvent(
-                    event="node_completed",
-                    data={
-                        "runId": run_id,
-                        "nodeId": node_id,
-                        "status": "error",
-                        "errorMessage": str(exc),
-                    },
-                )
-            )
-            await emit(
-                WorkflowEvent(
-                    event="workflow_completed",
-                    # Keep the terminal event self-contained. The Go control
-                    # plane persists this reason after the short Redis replay
-                    # window expires, while older consumers can ignore it.
-                    data={
-                        "runId": run_id,
-                        "status": "error",
-                        "errorMessage": str(exc),
-                    },
-                )
-            )
-            return
-
-    # 计算最终返回结果：只返回 targets
-    # 优先级：
-    # 1) 显式指定的 targets ∩ reachable
-    # 2) 可达子图中的 End 节点
-    # 3) 可达子图中的 sink 节点
+    # 计算最终返回结果
     targets: List[str]
     if spec.targets:
         targets = [nid for nid in spec.targets if nid in reachable]
@@ -436,12 +394,10 @@ async def run_workflow(
             reachable_sinks = [nid for nid in sink_nodes if nid in reachable]
             targets = reachable_sinks
 
-    # 聚合目标节点输出，保持返回结构稳定
     results_dict: Dict[str, Any] = {
         nid: context_outputs.get(nid) for nid in targets if nid in context_outputs
     }
 
-    # 如果只有单个目标节点，直接返回其值；多个则返回按节点 ID 的字典
     if len(results_dict) == 1:
         results: Any = next(iter(results_dict.values()))
     else:
@@ -457,3 +413,138 @@ async def run_workflow(
             },
         )
     )
+
+
+class NodeExecutionError(Exception):
+    """节点执行失败（携带用户可见的错误信息）。"""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message)
+        self.message = message
+
+
+class RetryableNodeError(NodeExecutionError):
+    """可重试的节点异常（配合 retryPolicy 使用）。"""
+
+
+async def _execute_node(
+    *,
+    node_id: str,
+    node: WorkflowNodeDTO,
+    run_id: str,
+    emit: EventEmitter,
+    context: Optional[Dict[str, Any]],
+    context_outputs: Dict[str, JsonDict],
+    in_edges_data: Dict[str, List[WorkflowEdgeDTO]],
+    overrides_by_node: Dict[str, List[OverrideDTO]],
+    out_edges_ctl: Dict[str, List[WorkflowEdgeDTO]],
+    control_fired: set[str],
+) -> None:
+    """执行单个节点：事件发布 + secret 解析 + retryPolicy 重试。"""
+
+    # 广播节点开始
+    await emit(
+        WorkflowEvent(
+            event="node_started",
+            data={"runId": run_id, "nodeId": node_id},
+        )
+    )
+
+    #    port_constants 属于作者静态配置，与 params 同等可信，可参与 secret 替换；
+    #    inputs（上游节点输出）是不可信数据，永不替换。
+    secret_map = (context or {}).get("secrets")
+    safe_constants = (
+        resolve_secrets_in_params(node.port_constants, secret_map)
+        if secret_map and node.port_constants
+        else node.port_constants
+    )
+    base_inputs = _merge_inputs_for_node(
+        node_id=node_id,
+        node=node,
+        in_edges_data=in_edges_data,
+        context_outputs=context_outputs,
+        port_constants=safe_constants,
+    )
+    inputs = _apply_overrides(
+        node_id=node_id,
+        base_inputs=base_inputs,
+        overrides_by_node=overrides_by_node,
+    )
+
+    # 仅对 params 进行 [[ KEY ]] 替换，inputs 保持原样
+    safe_params = resolve_secrets_in_params(node.params, secret_map) if secret_map else node.params
+    safe_inputs = inputs  # Inputs do not support secret replacement
+
+    retry_policy = _parse_retry_policy(node.params.get("retryPolicy"))
+
+    try:
+        node_cls = get_node_cls(node.type)
+    except KeyError as exc:
+        raise NodeExecutionError(f"unknown node type: {node.type!r}") from exc
+
+    last_exc: Optional[Exception] = None
+    for attempt in range(1, retry_policy["maxAttempts"] + 1):
+        try:
+            outputs = await node_cls.run(safe_inputs, safe_params, context=context)
+            last_exc = None
+            break
+        except RetryableNodeError as exc:
+            last_exc = exc
+            if attempt < retry_policy["maxAttempts"]:
+                await asyncio.sleep(retry_policy["backoffMs"] / 1000 * (2 ** (attempt - 1)))
+                continue
+            raise
+        except Exception as exc:  # noqa: BLE001
+            # 非可重试异常：直接失败
+            raise NodeExecutionError(str(exc)) from exc
+
+    if last_exc is not None:
+        raise NodeExecutionError(str(last_exc)) from last_exc
+
+    control_signals: Optional[Dict[str, bool]] = None
+    data_outputs: Any = outputs
+    if isinstance(outputs, dict):
+        cs_candidate = outputs.get("controlSignals")
+        if isinstance(cs_candidate, dict):
+            control_signals = {k: bool(v) for k, v in cs_candidate.items()}
+        data_outputs = dict(outputs)
+        if "controlSignals" in data_outputs:
+            data_outputs.pop("controlSignals")
+
+    context_outputs[node_id] = data_outputs
+
+    # 触发控制边：默认触发该节点所有控制输出；若提供 controlSignals，则只触发为 True 的端口
+    allowed_ports: Optional[set[str]] = None
+    if control_signals is not None:
+        allowed_ports = {pid for pid, flag in control_signals.items() if flag}
+    for e in out_edges_ctl.get(node_id, []):
+        if allowed_ports is None or e.source_port_id in allowed_ports:
+            control_fired.add(e.id)
+
+    await emit(
+        WorkflowEvent(
+            event="node_completed",
+            data={
+                "runId": run_id,
+                "nodeId": node_id,
+                "status": "success",
+                "inputValues": inputs,
+                "outputValues": outputs,
+            },
+        )
+    )
+
+
+def _parse_retry_policy(raw: Any) -> Dict[str, int]:
+    """解析节点 retryPolicy 参数：{maxAttempts, backoffMs}。"""
+    if not isinstance(raw, dict):
+        return {"maxAttempts": 1, "backoffMs": 0}
+    try:
+        max_attempts = max(1, min(int(raw.get("maxAttempts", 1)), 10))
+    except (TypeError, ValueError):
+        max_attempts = 1
+    try:
+        backoff_ms = max(0, min(int(raw.get("backoffMs", 200)), 30_000))
+    except (TypeError, ValueError):
+        backoff_ms = 0
+    return {"maxAttempts": max_attempts, "backoffMs": backoff_ms}
