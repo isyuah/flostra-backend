@@ -2,16 +2,16 @@ from __future__ import annotations
 
 import datetime
 import decimal
-import json
 import uuid
-from typing import Any, Dict, List, Union
+from typing import Any
 from urllib.parse import urlparse
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from .base import JsonDict, WorkflowNode, register_node
 from security.egress import check_outbound_host
+
+from .base import JsonDict, WorkflowNode, register_node
 
 
 def _json_serializer(obj: Any) -> Any:
@@ -110,7 +110,7 @@ class SqlNode(WorkflowNode):
                 result = await conn.execute(stmt, parameters)
 
                 row_count = result.rowcount
-                rows: List[Dict[str, Any]] = []
+                rows: list[dict[str, Any]] = []
 
                 if result.returns_rows:
                     keys = result.keys()

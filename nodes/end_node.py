@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Dict
+from typing import Any
 
 from .base import JsonDict, WorkflowNode, register_node
 
@@ -54,7 +54,7 @@ class EndNode(WorkflowNode):
     @classmethod
     async def run(cls, inputs: JsonDict, params: JsonDict, context: JsonDict = None) -> JsonDict:
         ports = params.get("ports")
-        outputs: Dict[str, Any] = {}
+        outputs: dict[str, Any] = {}
 
         if not ports:
             if "value" in inputs:

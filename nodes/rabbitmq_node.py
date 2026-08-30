@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Dict
 from urllib.parse import urlparse
 
 import aio_pika
 
-from .base import JsonDict, WorkflowNode, register_node
 from security.egress import check_outbound_host
+
+from .base import JsonDict, WorkflowNode, register_node
 
 
 @register_node

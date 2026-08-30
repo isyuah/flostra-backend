@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Dict, Optional
+from typing import Any
 
 from .base import JsonDict, WorkflowNode, register_node
 
@@ -118,7 +118,7 @@ class HttpStartNode(WorkflowNode):
         context = context or {}
         ctx_request = context.get("request") if isinstance(context, dict) else None
 
-        def _to_dict(val: Any) -> Dict[str, Any]:
+        def _to_dict(val: Any) -> dict[str, Any]:
             if val is None:
                 return {}
             if isinstance(val, dict):
@@ -138,7 +138,7 @@ class HttpStartNode(WorkflowNode):
         body = _to_dict(body_source) or _to_dict(ctx_request.get("body") if ctx_request else None)
 
         # 合并数据：body 优先覆盖 query
-        data: Dict[str, Any] = {}
+        data: dict[str, Any] = {}
         data.update(query)
         data.update(body)
 

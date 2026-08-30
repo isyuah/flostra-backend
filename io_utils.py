@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import base64
-import json
-from typing import Any, AsyncIterator, Dict, Optional, Tuple, Union
+from collections.abc import AsyncIterator
+from typing import Any
 
 import httpx
 from aiobotocore.session import get_session
@@ -11,7 +11,7 @@ from botocore.config import Config as BotoCoreConfig
 from runtime_files import get_file_record, is_file_ref
 from security.egress import check_outbound_url
 
-JsonDict = Dict[str, Any]
+JsonDict = dict[str, Any]
 
 
 class FileIoService:
@@ -22,7 +22,7 @@ class FileIoService:
     """
 
     @classmethod
-    async def get_file_bytes(cls, ctx: JsonDict, file_ref: JsonDict) -> Tuple[bytes, str, Optional[str]]:
+    async def get_file_bytes(cls, ctx: JsonDict, file_ref: JsonDict) -> tuple[bytes, str, str | None]:
         """
         获取文件的完整二进制内容。
 
@@ -64,7 +64,7 @@ class FileIoService:
         raise ValueError(f"Unable to resolve content for file: {file_id} (source={source})")
 
     @classmethod
-    async def get_file_stream(cls, ctx: JsonDict, file_ref: JsonDict) -> Tuple[AsyncIterator[bytes], str, Optional[str], Optional[int]]:
+    async def get_file_stream(cls, ctx: JsonDict, file_ref: JsonDict) -> tuple[AsyncIterator[bytes], str, str | None, int | None]:
         """
         获取文件的异步读取流。
 
@@ -125,7 +125,7 @@ class FileIoService:
             return resp.content
 
     @staticmethod
-    async def _create_s3_client(meta: Dict[str, Any]):
+    async def _create_s3_client(meta: dict[str, Any]):
         session = get_session()
         config = BotoCoreConfig(
             signature_version="s3v4",
@@ -147,7 +147,7 @@ class FileIoService:
         return session.create_client("s3", **client_kwargs)
 
     @classmethod
-    async def _read_s3_bytes(cls, meta: Dict[str, Any]) -> bytes:
+    async def _read_s3_bytes(cls, meta: dict[str, Any]) -> bytes:
         bucket = meta.get("bucket")
         key = meta.get("key")
         if not bucket or not key:
@@ -164,10 +164,7 @@ class FileIoService:
                 return await stream.read()
 
     @classmethod
-    async def _get_s3_stream(cls, meta: Dict[str, Any]) -> AsyncIterator[bytes]:
-        bucket = meta.get("bucket")
-        key = meta.get("key")
-
+    async def _get_s3_stream(cls, meta: dict[str, Any]) -> AsyncIterator[bytes]:
         # 注意: 这里返回的 stream 依赖 client 的上下文。
         # 正确的做法应该让调用者管理 client 生命周期，或者使用 smart stream wrapper。
         # 为简化 MVP，这里暂时使用一次性读取 (TODO: 优化为真正的流式透传)

@@ -105,7 +105,7 @@ async def _run_worker() -> None:
                 break
             logger.info("Worker started; waiting for messages")
             await stop_event.wait()
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             if stop_event.is_set():
                 break
             logger.warning(
@@ -115,7 +115,7 @@ async def _run_worker() -> None:
             )
             try:
                 await asyncio.wait_for(stop_event.wait(), timeout=reconnect_delay)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 pass
         finally:
             await worker.stop()

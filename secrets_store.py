@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from typing import Any, Dict, List, Union
+from typing import Any
 
 # 匹配 [[ KEY ]] 或 [[KEY]]，忽略前后空格
 # Group 1 是 KEY
@@ -12,7 +12,7 @@ class SecretResolutionError(ValueError):
     """引用了不存在的 secret，且该引用无法解析。"""
 
 
-def resolve_secrets_in_params(params: Dict[str, Any], secret_map: Dict[str, str]) -> Dict[str, Any]:
+def resolve_secrets_in_params(params: dict[str, Any], secret_map: dict[str, str]) -> dict[str, Any]:
     """
     递归遍历 params，将字符串值中的 [[ KEY ]] 替换为 secret_map[KEY]。
 
@@ -27,7 +27,7 @@ def resolve_secrets_in_params(params: Dict[str, Any], secret_map: Dict[str, str]
         _assert_no_references(params)
         return params
 
-    resolved: Dict[str, Any] = {}
+    resolved: dict[str, Any] = {}
     for k, v in params.items():
         resolved[k] = _resolve_value(v, secret_map)
     return resolved
@@ -48,7 +48,7 @@ def _assert_no_references(value: Any) -> None:
             _assert_no_references(item)
 
 
-def _resolve_value(value: Any, secret_map: Dict[str, str]) -> Any:
+def _resolve_value(value: Any, secret_map: dict[str, str]) -> Any:
     """内部递归辅助函数"""
     if isinstance(value, str):
         if "[[" not in value:

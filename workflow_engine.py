@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import collections
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable, Dict, List, Optional
+from typing import Any
 
 from nodes import get_node_cls
 from secrets_store import resolve_secrets_in_params
 
-JsonDict = Dict[str, Any]
+JsonDict = dict[str, Any]
 
 
 @dataclass
@@ -18,7 +19,7 @@ class WorkflowNodeDTO:
     id: str
     type: str
     params: JsonDict
-    port_constants: Optional[JsonDict] = None
+    port_constants: JsonDict | None = None
 
 
 @dataclass
@@ -46,11 +47,11 @@ class OverrideDTO:
 class RunWorkflowSpec:
     """一次运行需要的完整图结构"""
 
-    nodes: List[WorkflowNodeDTO]
-    edges: List[WorkflowEdgeDTO]
-    entry_nodes: Optional[List[str]] = None
-    targets: Optional[List[str]] = None
-    overrides: List[OverrideDTO] = None
+    nodes: list[WorkflowNodeDTO]
+    edges: list[WorkflowEdgeDTO]
+    entry_nodes: list[str] | None = None
+    targets: list[str] | None = None
+    overrides: list[OverrideDTO] = None
 
     def __post_init__(self) -> None:
         if self.overrides is None:
@@ -70,18 +71,18 @@ EventEmitter = Callable[[WorkflowEvent], Awaitable[None]]
 
 def _build_graph(
     spec: RunWorkflowSpec,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """根据节点和边构建拓扑所需的辅助结构"""
-    node_map: Dict[str, WorkflowNodeDTO] = {n.id: n for n in spec.nodes}
+    node_map: dict[str, WorkflowNodeDTO] = {n.id: n for n in spec.nodes}
 
     # 出边 / 入边表（区分 data 与 control）
-    out_edges_data: Dict[str, List[WorkflowEdgeDTO]] = {n.id: [] for n in spec.nodes}
-    in_edges_data: Dict[str, List[WorkflowEdgeDTO]] = {n.id: [] for n in spec.nodes}
-    out_edges_ctl: Dict[str, List[WorkflowEdgeDTO]] = {n.id: [] for n in spec.nodes}
-    in_edges_ctl: Dict[str, List[WorkflowEdgeDTO]] = {n.id: [] for n in spec.nodes}
+    out_edges_data: dict[str, list[WorkflowEdgeDTO]] = {n.id: [] for n in spec.nodes}
+    in_edges_data: dict[str, list[WorkflowEdgeDTO]] = {n.id: [] for n in spec.nodes}
+    out_edges_ctl: dict[str, list[WorkflowEdgeDTO]] = {n.id: [] for n in spec.nodes}
+    in_edges_ctl: dict[str, list[WorkflowEdgeDTO]] = {n.id: [] for n in spec.nodes}
 
-    indegree_all: Dict[str, int] = {n.id: 0 for n in spec.nodes}
-    indegree_ctl: Dict[str, int] = {n.id: 0 for n in spec.nodes}
+    indegree_all: dict[str, int] = {n.id: 0 for n in spec.nodes}
+    indegree_ctl: dict[str, int] = {n.id: 0 for n in spec.nodes}
 
     for e in spec.edges:
         if e.source_node_id not in node_map or e.target_node_id not in node_map:
@@ -101,10 +102,10 @@ def _build_graph(
             indegree_ctl[e.target_node_id] += 1
 
     # Kahn 拓扑排序，要求是 DAG
-    queue: "collections.deque[str]" = collections.deque(
+    queue: collections.deque[str] = collections.deque(
         [nid for nid, deg in indegree_all.items() if deg == 0]
     )
-    topo_order: List[str] = []
+    topo_order: list[str] = []
 
     while queue:
         nid = queue.popleft()
@@ -118,10 +119,10 @@ def _build_graph(
         raise ValueError("Workflow graph contains cycles, DAG is required")
 
     # 控制子图也需无环
-    queue_ctl: "collections.deque[str]" = collections.deque(
+    queue_ctl: collections.deque[str] = collections.deque(
         [nid for nid, deg in indegree_ctl.items() if deg == 0]
     )
-    visited_ctl: List[str] = []
+    visited_ctl: list[str] = []
     while queue_ctl:
         nid = queue_ctl.popleft()
         visited_ctl.append(nid)
@@ -164,7 +165,7 @@ def _build_graph(
 def _apply_overrides(
     node_id: str,
     base_inputs: JsonDict,
-    overrides_by_node: Dict[str, List[OverrideDTO]],
+    overrides_by_node: dict[str, list[OverrideDTO]],
 ) -> JsonDict:
     """将 overrides 应用到某个节点的输入上，后写覆盖先写"""
     result = dict(base_inputs)
@@ -176,9 +177,9 @@ def _apply_overrides(
 def _merge_inputs_for_node(
     node_id: str,
     node: WorkflowNodeDTO,
-    in_edges_data: Dict[str, List[WorkflowEdgeDTO]],
-    context_outputs: Dict[str, JsonDict],
-    port_constants: Optional[JsonDict] = None,
+    in_edges_data: dict[str, list[WorkflowEdgeDTO]],
+    context_outputs: dict[str, JsonDict],
+    port_constants: JsonDict | None = None,
 ) -> JsonDict:
     """
     汇总某个节点的输入：
@@ -205,7 +206,7 @@ async def run_workflow(
     run_id: str,
     spec: RunWorkflowSpec,
     emit: EventEmitter,
-    context: Optional[Dict[str, Any]] = None,
+    context: dict[str, Any] | None = None,
 ) -> None:
     """
     执行整张工作流：
@@ -215,24 +216,24 @@ async def run_workflow(
     - 通过 emit 回调把事件抛给外层（通常是 SSE）
     """
     graph = _build_graph(spec)
-    node_map: Dict[str, WorkflowNodeDTO] = graph["node_map"]
-    out_edges_data: Dict[str, List[WorkflowEdgeDTO]] = graph["out_edges_data"]
-    in_edges_data: Dict[str, List[WorkflowEdgeDTO]] = graph["in_edges_data"]
-    out_edges_ctl: Dict[str, List[WorkflowEdgeDTO]] = graph["out_edges_ctl"]
-    in_edges_ctl: Dict[str, List[WorkflowEdgeDTO]] = graph["in_edges_ctl"]
-    topo_order: List[str] = graph["topo_order"]
-    sink_nodes: List[str] = graph["sink_nodes"]
-    end_nodes: List[str] = graph["end_nodes"]
+    node_map: dict[str, WorkflowNodeDTO] = graph["node_map"]
+    out_edges_data: dict[str, list[WorkflowEdgeDTO]] = graph["out_edges_data"]
+    in_edges_data: dict[str, list[WorkflowEdgeDTO]] = graph["in_edges_data"]
+    out_edges_ctl: dict[str, list[WorkflowEdgeDTO]] = graph["out_edges_ctl"]
+    in_edges_ctl: dict[str, list[WorkflowEdgeDTO]] = graph["in_edges_ctl"]
+    topo_order: list[str] = graph["topo_order"]
+    sink_nodes: list[str] = graph["sink_nodes"]
+    end_nodes: list[str] = graph["end_nodes"]
 
     # 预处理 overrides：按 node 分组
-    overrides_by_node: Dict[str, List[OverrideDTO]] = {}
+    overrides_by_node: dict[str, list[OverrideDTO]] = {}
     for ov in spec.overrides:
         overrides_by_node.setdefault(ov.node_id, []).append(ov)
 
-    context_outputs: Dict[str, JsonDict] = {}
+    context_outputs: dict[str, JsonDict] = {}
     control_fired: set[str] = set()  # 已触发的控制边 ID
-    failed_node: Optional[str] = None
-    failure_message: Optional[str] = None
+    failed_node: str | None = None
+    failure_message: str | None = None
 
     def should_skip_node(node_id: str) -> bool:
         ctl_in_edges = in_edges_ctl.get(node_id, [])
@@ -289,7 +290,7 @@ async def run_workflow(
                 raise ValueError(f"entry node {nid!r} not found in workflow nodes")
 
         reachable = set()
-        queue: "collections.deque[str]" = collections.deque(spec.entry_nodes)
+        queue: collections.deque[str] = collections.deque(spec.entry_nodes)
         while queue:
             nid = queue.popleft()
             if nid in reachable:
@@ -301,7 +302,7 @@ async def run_workflow(
         reachable = all_nodes
 
     # 在全局拓扑序基础上过滤得到本次实际执行顺序
-    effective_order: List[str] = [nid for nid in topo_order if nid in reachable]
+    effective_order: list[str] = [nid for nid in topo_order if nid in reachable]
 
     # 触发全局开始事件
     await emit(WorkflowEvent(event="workflow_started", data={"runId": run_id}))
@@ -383,7 +384,7 @@ async def run_workflow(
         return
 
     # 计算最终返回结果
-    targets: List[str]
+    targets: list[str]
     if spec.targets:
         targets = [nid for nid in spec.targets if nid in reachable]
     else:
@@ -394,7 +395,7 @@ async def run_workflow(
             reachable_sinks = [nid for nid in sink_nodes if nid in reachable]
             targets = reachable_sinks
 
-    results_dict: Dict[str, Any] = {
+    results_dict: dict[str, Any] = {
         nid: context_outputs.get(nid) for nid in targets if nid in context_outputs
     }
 
@@ -433,11 +434,11 @@ async def _execute_node(
     node: WorkflowNodeDTO,
     run_id: str,
     emit: EventEmitter,
-    context: Optional[Dict[str, Any]],
-    context_outputs: Dict[str, JsonDict],
-    in_edges_data: Dict[str, List[WorkflowEdgeDTO]],
-    overrides_by_node: Dict[str, List[OverrideDTO]],
-    out_edges_ctl: Dict[str, List[WorkflowEdgeDTO]],
+    context: dict[str, Any] | None,
+    context_outputs: dict[str, JsonDict],
+    in_edges_data: dict[str, list[WorkflowEdgeDTO]],
+    overrides_by_node: dict[str, list[OverrideDTO]],
+    out_edges_ctl: dict[str, list[WorkflowEdgeDTO]],
     control_fired: set[str],
 ) -> None:
     """执行单个节点：事件发布 + secret 解析 + retryPolicy 重试。"""
@@ -482,7 +483,7 @@ async def _execute_node(
     except KeyError as exc:
         raise NodeExecutionError(f"unknown node type: {node.type!r}") from exc
 
-    last_exc: Optional[Exception] = None
+    last_exc: Exception | None = None
     for attempt in range(1, retry_policy["maxAttempts"] + 1):
         try:
             outputs = await node_cls.run(safe_inputs, safe_params, context=context)
@@ -494,14 +495,14 @@ async def _execute_node(
                 await asyncio.sleep(retry_policy["backoffMs"] / 1000 * (2 ** (attempt - 1)))
                 continue
             raise
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             # 非可重试异常：直接失败
             raise NodeExecutionError(str(exc)) from exc
 
     if last_exc is not None:
         raise NodeExecutionError(str(last_exc)) from last_exc
 
-    control_signals: Optional[Dict[str, bool]] = None
+    control_signals: dict[str, bool] | None = None
     data_outputs: Any = outputs
     if isinstance(outputs, dict):
         cs_candidate = outputs.get("controlSignals")
@@ -514,7 +515,7 @@ async def _execute_node(
     context_outputs[node_id] = data_outputs
 
     # 触发控制边：默认触发该节点所有控制输出；若提供 controlSignals，则只触发为 True 的端口
-    allowed_ports: Optional[set[str]] = None
+    allowed_ports: set[str] | None = None
     if control_signals is not None:
         allowed_ports = {pid for pid, flag in control_signals.items() if flag}
     for e in out_edges_ctl.get(node_id, []):
@@ -535,7 +536,7 @@ async def _execute_node(
     )
 
 
-def _parse_retry_policy(raw: Any) -> Dict[str, int]:
+def _parse_retry_policy(raw: Any) -> dict[str, int]:
     """解析节点 retryPolicy 参数：{maxAttempts, backoffMs}。"""
     if not isinstance(raw, dict):
         return {"maxAttempts": 1, "backoffMs": 0}

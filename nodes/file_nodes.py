@@ -2,15 +2,13 @@ from __future__ import annotations
 
 import json
 import mimetypes
-from typing import Any, Dict, List, Optional
+from typing import Any
 from urllib.parse import urlparse
 
-import httpx
-
+from io_utils import FileIoService
 from runtime_files import (
     build_file_ref,
     download_url_bytes,
-    from_base64,
     get_file_record,
     is_file_ref,
     new_file_id,
@@ -18,12 +16,11 @@ from runtime_files import (
     to_base64,
     upsert_file_record,
 )
-from io_utils import FileIoService
 
 from .base import JsonDict, WorkflowNode, register_node
 
 
-def _guess_mime(name: Optional[str], fallback: str = "application/octet-stream") -> str:
+def _guess_mime(name: str | None, fallback: str = "application/octet-stream") -> str:
     if not name:
         return fallback
     mime, _ = mimetypes.guess_type(name)
@@ -181,7 +178,7 @@ class FileToObjectNode(WorkflowNode):
         file_id = str(file_obj.get("id"))
         rec = get_file_record(context, file_id) or {}
 
-        meta: Dict[str, Any] = {
+        meta: dict[str, Any] = {
             "id": file_id,
             "name": file_obj.get("name") or rec.get("name") or None,
             "mime": file_obj.get("mime") or rec.get("mime") or None,
@@ -193,7 +190,7 @@ class FileToObjectNode(WorkflowNode):
 
         include = params.get("include")
         if isinstance(include, list) and include:
-            picked: Dict[str, Any] = {}
+            picked: dict[str, Any] = {}
             for k in include:
                 if not isinstance(k, str):
                     continue
@@ -305,7 +302,6 @@ class FileParseNode(WorkflowNode):
             raise ValueError("file.parse 需要输入 FileRef")
 
         fmt = (params.get("format") or "auto").lower()
-        max_bytes = _max_bytes(params, default=8_000_000)
         text_max_chars = int(params.get("text_max_chars") or 20_000)
         rows_max = int(params.get("rows_max") or 200)
         sheet = int(params.get("sheet") or 0)
@@ -347,7 +343,7 @@ class FileParseNode(WorkflowNode):
             text = data.decode(encoding, errors="replace")
             try:
                 obj = json.loads(text)
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 raise ValueError(f"JSON 解析失败：{exc}") from exc
             return {"meta": meta, "text": json.dumps(obj, ensure_ascii=False)}
 
@@ -357,7 +353,7 @@ class FileParseNode(WorkflowNode):
 
             text = data.decode(encoding, errors="replace")
             reader = csv.reader(io.StringIO(text))
-            rows: List[List[Any]] = []
+            rows: list[list[Any]] = []
             for i, row in enumerate(reader):
                 if i >= rows_max:
                     meta["truncated"] = True
@@ -391,7 +387,7 @@ class FileParseNode(WorkflowNode):
             if sheet < 0 or sheet >= len(sheets):
                 raise ValueError(f"sheet 索引超出范围: {sheet}")
             ws = wb[sheets[sheet]]
-            rows: List[List[Any]] = []
+            rows: list[list[Any]] = []
             for i, row in enumerate(ws.iter_rows(values_only=True)):
                 if i >= rows_max:
                     meta["truncated"] = True

@@ -95,7 +95,7 @@ def _render_template_string(template: str, context: Any) -> str:
 
     pattern = re.compile(r"{{\s*([a-zA-Z_][\w\.\[\]0-9]*|)\s*}}")
 
-    def repl(match: "re.Match[str]") -> str:
+    def repl(match: re.Match[str]) -> str:
         path = match.group(1).strip()
         if path == "":
             value = context

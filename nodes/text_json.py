@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-from typing import Any
 
 from .base import JsonDict, WorkflowNode, register_node
 from .utils import json_resolve_path
@@ -52,7 +51,7 @@ class TextToJsonNode(WorkflowNode):
             if path:
                 data = json_resolve_path(data, path, default=None)
             return {"json": data, "ok": True, "error": None}
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             if strict:
                 raise ValueError(f"JSON 解析失败: {exc}") from exc
             return {"json": None, "ok": False, "error": str(exc)}

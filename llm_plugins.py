@@ -1,12 +1,15 @@
 from __future__ import annotations
 
-from abc import ABC, abstractmethod
 import base64
 import io
+import re
+from abc import ABC, abstractmethod
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, Type
+from typing import Any
 
 from security.egress import check_outbound_url
+
 
 @dataclass
 class LLMContext:
@@ -16,23 +19,23 @@ class LLMContext:
     """
 
     # 基础元数据
-    session_id: Optional[str] = None
+    session_id: str | None = None
     user_query: str = ""
 
     # 输入参数（可被插件修改）
     system_prompt: str = ""
-    messages: List[Dict[str, Any]] = field(default_factory=list)
+    messages: list[dict[str, Any]] = field(default_factory=list)
 
     # 工具相关
-    tools: List[Dict[str, Any]] = field(default_factory=list)  # OpenAI tool schema 列表
-    tool_functions: Dict[str, Callable[..., Any]] = field(default_factory=dict)  # name -> callable
+    tools: list[dict[str, Any]] = field(default_factory=list)  # OpenAI tool schema 列表
+    tool_functions: dict[str, Callable[..., Any]] = field(default_factory=dict)  # name -> callable
 
     # 执行结果
     ai_response_text: str = ""
     ai_raw_response: Any = None
 
     # 额外透传/调试数据
-    extra_data: Dict[str, Any] = field(default_factory=dict)
+    extra_data: dict[str, Any] = field(default_factory=dict)
 
 
 class WorkflowPlugin(ABC):
@@ -40,27 +43,27 @@ class WorkflowPlugin(ABC):
 
     type: str  # 唯一标识
 
-    def __init__(self, config: Dict[str, Any]):
+    def __init__(self, config: dict[str, Any]):
         self.config = config or {}
 
     @classmethod
     @abstractmethod
-    def get_schema(cls) -> Dict[str, Any]:
+    def get_schema(cls) -> dict[str, Any]:
         """返回插件的配置 schema（前端用）"""
 
     async def on_pre_process(self, context: LLMContext) -> None:
         """LLM 调用前的钩子"""
-        return None
+        return
 
     async def on_post_process(self, context: LLMContext) -> None:
         """LLM 调用后的钩子"""
-        return None
+        return
 
 
-_PLUGIN_REGISTRY: Dict[str, Type[WorkflowPlugin]] = {}
+_PLUGIN_REGISTRY: dict[str, type[WorkflowPlugin]] = {}
 
 
-def register_plugin(cls: Type[WorkflowPlugin]) -> Type[WorkflowPlugin]:
+def register_plugin(cls: type[WorkflowPlugin]) -> type[WorkflowPlugin]:
     p_type = getattr(cls, "type", None)
     if not p_type:
         raise ValueError("Plugin class must define a non-empty 'type'")
@@ -70,11 +73,11 @@ def register_plugin(cls: Type[WorkflowPlugin]) -> Type[WorkflowPlugin]:
     return cls
 
 
-def get_plugin_class(plugin_type: str) -> Optional[Type[WorkflowPlugin]]:
+def get_plugin_class(plugin_type: str) -> type[WorkflowPlugin] | None:
     return _PLUGIN_REGISTRY.get(plugin_type)
 
 
-def list_plugins_schema() -> List[Dict[str, Any]]:
+def list_plugins_schema() -> list[dict[str, Any]]:
     """给前端：返回所有插件的 schema 列表"""
     return [cls.get_schema() for cls in _PLUGIN_REGISTRY.values()]
 
@@ -82,9 +85,9 @@ def list_plugins_schema() -> List[Dict[str, Any]]:
 class PluginExecutor:
     """串行执行插件生命周期"""
 
-    def __init__(self, plugins_conf: List[Dict[str, Any]], context: LLMContext):
+    def __init__(self, plugins_conf: list[dict[str, Any]], context: LLMContext):
         self.context = context
-        self.plugins: List[WorkflowPlugin] = []
+        self.plugins: list[WorkflowPlugin] = []
         for conf in plugins_conf or []:
             p_type = conf.get("type")
             p_cls = get_plugin_class(p_type)
@@ -107,7 +110,7 @@ class LanguageEnforceZhPlugin(WorkflowPlugin):
     type = "lang-zh"
 
     @classmethod
-    def get_schema(cls) -> Dict[str, Any]:
+    def get_schema(cls) -> dict[str, Any]:
         return {
             "type": cls.type,
             "label": "语言：中文",
@@ -131,7 +134,7 @@ class InputTruncatePlugin(WorkflowPlugin):
     type = "input-truncate"
 
     @classmethod
-    def get_schema(cls) -> Dict[str, Any]:
+    def get_schema(cls) -> dict[str, Any]:
         return {
             "type": cls.type,
             "label": "输入截断",
@@ -179,7 +182,7 @@ class DatetimeToolPlugin(WorkflowPlugin):
     type = "tool-datetime"
 
     @classmethod
-    def get_schema(cls) -> Dict[str, Any]:
+    def get_schema(cls) -> dict[str, Any]:
         return {
             "type": cls.type,
             "label": "工具：当前时间",
@@ -215,7 +218,7 @@ class SafetyFilterPlugin(WorkflowPlugin):
     type = "safety-filter"
 
     @classmethod
-    def get_schema(cls) -> Dict[str, Any]:
+    def get_schema(cls) -> dict[str, Any]:
         return {
             "type": cls.type,
             "label": "安全过滤",
@@ -282,7 +285,7 @@ class HttpToolPlugin(WorkflowPlugin):
     type = "tool-http"
 
     @classmethod
-    def get_schema(cls) -> Dict[str, Any]:
+    def get_schema(cls) -> dict[str, Any]:
         return {
             "type": cls.type,
             "label": "工具：HTTP",
@@ -310,8 +313,12 @@ class HttpToolPlugin(WorkflowPlugin):
         }
 
     async def on_pre_process(self, context: LLMContext) -> None:
-        import httpx
         import urllib.parse
+
+        import httpx
+
+        allowed = set(self.config.get("allowed_hosts") or [])
+        timeout = float(self.config.get("timeout") or 8)
 
         def _check_host(url: str) -> None:
             host = urllib.parse.urlparse(url).hostname or ""
@@ -321,7 +328,7 @@ class HttpToolPlugin(WorkflowPlugin):
             # 防止白名单域名解析到内网地址或配置了内网域名。
             check_outbound_url(url)
 
-        async def _http_get(url: str, headers: Optional[Dict[str, str]] = None, params: Optional[Dict[str, Any]] = None) -> Any:
+        async def _http_get(url: str, headers: dict[str, str] | None = None, params: dict[str, Any] | None = None) -> Any:
             _check_host(url)
             async with httpx.AsyncClient(timeout=timeout) as client:
                 r = await client.get(url, headers=headers, params=params)
@@ -330,7 +337,7 @@ class HttpToolPlugin(WorkflowPlugin):
                 except Exception:
                     return r.text
 
-        async def _http_post(url: str, json_body: Optional[Any] = None, headers: Optional[Dict[str, str]] = None) -> Any:
+        async def _http_post(url: str, json_body: Any | None = None, headers: dict[str, str] | None = None) -> Any:
             _check_host(url)
             async with httpx.AsyncClient(timeout=timeout) as client:
                 r = await client.post(url, json=json_body, headers=headers)
@@ -388,7 +395,7 @@ class MathToolPlugin(WorkflowPlugin):
     type = "tool-math"
 
     @classmethod
-    def get_schema(cls) -> Dict[str, Any]:
+    def get_schema(cls) -> dict[str, Any]:
         return {
             "type": cls.type,
             "label": "工具：计算器",
@@ -451,7 +458,7 @@ class AttachmentToolPlugin(WorkflowPlugin):
     type = "tool-attachments"
 
     @classmethod
-    def get_schema(cls) -> Dict[str, Any]:
+    def get_schema(cls) -> dict[str, Any]:
         return {
             "type": cls.type,
             "label": "工具：附件",
@@ -499,13 +506,13 @@ class AttachmentToolPlugin(WorkflowPlugin):
             # 估算实际字节大小，考虑 padding 略微放宽
             return int(length * 0.75)
 
-        def _find_att(name: str) -> Optional[Dict[str, Any]]:
+        def _find_att(name: str) -> dict[str, Any] | None:
             for att in attachments:
                 if isinstance(att, dict) and att.get("name") == name:
                     return att
             return None
 
-        def _get_att_data(name: str) -> Dict[str, Any]:
+        def _get_att_data(name: str) -> dict[str, Any]:
             att = _find_att(name)
             if not att:
                 raise ValueError(f"附件未找到: {name}")
@@ -515,8 +522,8 @@ class AttachmentToolPlugin(WorkflowPlugin):
                 raise ValueError(f"附件过大（约 {size} bytes > {max_bytes} 上限）")
             return {"name": att.get("name") or "", "mime": att.get("mime") or "", "b64": b64, "size": size}
 
-        def _list_files() -> List[Dict[str, Any]]:
-            result: List[Dict[str, Any]] = []
+        def _list_files() -> list[dict[str, Any]]:
+            result: list[dict[str, Any]] = []
             for att in attachments:
                 if not isinstance(att, dict):
                     continue
@@ -530,11 +537,11 @@ class AttachmentToolPlugin(WorkflowPlugin):
                 )
             return result
 
-        def _get_base64(name: str) -> Dict[str, Any]:
+        def _get_base64(name: str) -> dict[str, Any]:
             info = _get_att_data(name)
             return {"name": info["name"], "mime": info["mime"], "base64": info["b64"]}
 
-        def _docx_to_text(name: str, max_chars: Optional[int] = None) -> Dict[str, Any]:
+        def _docx_to_text(name: str, max_chars: int | None = None) -> dict[str, Any]:
             info = _get_att_data(name)
             limit = min(int(max_chars or text_max_chars), text_max_chars)
             try:
@@ -548,10 +555,10 @@ class AttachmentToolPlugin(WorkflowPlugin):
                 if len(text) > limit:
                     text = text[:limit]
                 return {"name": info["name"], "mime": info["mime"], "text": text, "truncated": len(text) >= limit}
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 return {"error": f"docx 解析失败: {exc}"}
 
-        def _xlsx_to_rows(name: str, sheet: int = 0, max_rows: Optional[int] = None) -> Dict[str, Any]:
+        def _xlsx_to_rows(name: str, sheet: int = 0, max_rows: int | None = None) -> dict[str, Any]:
             info = _get_att_data(name)
             limit = min(int(max_rows or rows_max), rows_max)
             try:
@@ -566,13 +573,13 @@ class AttachmentToolPlugin(WorkflowPlugin):
                 if idx < 0 or idx >= len(sheets):
                     return {"error": f"sheet 索引超出范围: {sheet}"}
                 ws = wb[sheets[idx]]
-                rows: List[List[Any]] = []
+                rows: list[list[Any]] = []
                 for i, row in enumerate(ws.iter_rows(values_only=True)):
                     if i >= limit:
                         break
                     rows.append([cell for cell in row])
                 return {"name": info["name"], "mime": info["mime"], "sheet": sheets[idx], "rows": rows}
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 return {"error": f"xlsx 解析失败: {exc}"}
 
         # 注册 tools schema

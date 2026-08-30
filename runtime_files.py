@@ -3,14 +3,14 @@ from __future__ import annotations
 import base64
 import hashlib
 import uuid
-from typing import Any, Dict, Optional
+from typing import Any
 from urllib.parse import urlparse
 
 import httpx
 
 from security.egress import check_outbound_url
 
-JsonDict = Dict[str, Any]
+JsonDict = dict[str, Any]
 
 
 def new_file_id() -> str:
@@ -24,12 +24,12 @@ def is_file_ref(obj: Any) -> bool:
 def build_file_ref(
     *,
     file_id: str,
-    name: Optional[str] = None,
-    mime: Optional[str] = None,
-    size: Optional[int] = None,
-    sha256: Optional[str] = None,
-    source: Optional[str] = None,
-    content_base64: Optional[str] = None,
+    name: str | None = None,
+    mime: str | None = None,
+    size: int | None = None,
+    sha256: str | None = None,
+    source: str | None = None,
+    content_base64: str | None = None,
 ) -> JsonDict:
     ref: JsonDict = {"__kind": "file", "id": str(file_id)}
     if name is not None:
@@ -58,11 +58,11 @@ def to_base64(data: bytes) -> str:
 def from_base64(b64_str: str) -> bytes:
     try:
         return base64.b64decode(b64_str or "", validate=False)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         raise ValueError(f"非法 base64 数据：{exc}") from exc
 
 
-def get_cache_map(ctx: Any, *, create: bool = True) -> Optional[JsonDict]:
+def get_cache_map(ctx: Any, *, create: bool = True) -> JsonDict | None:
     if not isinstance(ctx, dict):
         return None
     cache_map = ctx.get("cacheMap")
@@ -79,7 +79,7 @@ def get_cache_map(ctx: Any, *, create: bool = True) -> Optional[JsonDict]:
     return cache_map
 
 
-def get_files_map(ctx: Any, *, create: bool = True) -> Optional[JsonDict]:
+def get_files_map(ctx: Any, *, create: bool = True) -> JsonDict | None:
     cache_map = get_cache_map(ctx, create=create)
     if cache_map is None:
         return None
@@ -97,7 +97,7 @@ def get_files_map(ctx: Any, *, create: bool = True) -> Optional[JsonDict]:
     return files
 
 
-def get_file_record(ctx: Any, file_id: str) -> Optional[JsonDict]:
+def get_file_record(ctx: Any, file_id: str) -> JsonDict | None:
     files = get_files_map(ctx, create=False)
     if not files:
         return None
@@ -105,7 +105,7 @@ def get_file_record(ctx: Any, file_id: str) -> Optional[JsonDict]:
     return rec if isinstance(rec, dict) else None
 
 
-def upsert_file_record(ctx: Any, file_id: str, **fields: Any) -> Optional[JsonDict]:
+def upsert_file_record(ctx: Any, file_id: str, **fields: Any) -> JsonDict | None:
     files = get_files_map(ctx, create=True)
     if files is None:
         return None

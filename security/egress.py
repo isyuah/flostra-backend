@@ -21,7 +21,6 @@ from __future__ import annotations
 import ipaddress
 import os
 import socket
-from typing import Iterable, Optional, Tuple
 from urllib.parse import urlparse
 
 # 云厂商 metadata 端点（常见固定 IP 段）。
@@ -61,7 +60,7 @@ class EgressError(ValueError):
     """目标地址被 egress 策略拒绝。"""
 
 
-def _truthy(value: Optional[str]) -> bool:
+def _truthy(value: str | None) -> bool:
     if value is None:
         return False
     return value.strip().lower() not in {"", "0", "false", "no", "off"}
@@ -75,7 +74,7 @@ def _allow_metadata() -> bool:
     return _truthy(os.getenv("WORKER_EGRESS_ALLOW_METADATA"))
 
 
-def _classify(ip: ipaddress._BaseAddress) -> Tuple[bool, str]:
+def _classify(ip: ipaddress._BaseAddress) -> tuple[bool, str]:
     """返回 (是否允许, 拒绝原因)。"""
     if not _allow_private():
         for net in _PRIVATE_NETS + _EXTRA_NETS:
@@ -88,7 +87,7 @@ def _classify(ip: ipaddress._BaseAddress) -> Tuple[bool, str]:
     return True, ""
 
 
-def _parse_host(host: str) -> Optional[ipaddress._BaseAddress]:
+def _parse_host(host: str) -> ipaddress._BaseAddress | None:
     """host 若是 IP 字面量则返回 ip 对象，否则返回 None。"""
     try:
         return ipaddress.ip_address(host.strip("[]"))
@@ -96,7 +95,7 @@ def _parse_host(host: str) -> Optional[ipaddress._BaseAddress]:
         return None
 
 
-def check_outbound_host(host: str, port: Optional[int] = None) -> None:
+def check_outbound_host(host: str, port: int | None = None) -> None:
     """校验单个出站主机（域名或 IP）。
 
     域名会解析为所有 A/AAAA 记录并逐一校验；解析失败视为拒绝，

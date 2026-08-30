@@ -4,7 +4,7 @@ import json
 import os
 import uuid
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any
 
 from llm_plugins import list_plugins_schema
 from nodes import get_all_node_schemas
@@ -28,7 +28,7 @@ def _atomic_write_json(path: Path, payload: Any) -> None:
     os.replace(tmp, path)
 
 
-def export_definitions(out_dir: Path) -> Dict[str, Path]:
+def export_definitions(out_dir: Path) -> dict[str, Path]:
     """
     导出前端所需的静态 schema：
     - nodes: get_all_node_schemas()
@@ -44,7 +44,7 @@ def export_definitions(out_dir: Path) -> Dict[str, Path]:
     return {"nodes": node_path, "plugins": plugin_path}
 
 
-def export_definitions_if_enabled(*, base_dir: Optional[Path] = None) -> Dict[str, Path]:
+def export_definitions_if_enabled(*, base_dir: Path | None = None) -> dict[str, Path]:
     """
     供启动流程调用：由环境变量控制是否导出与导出目录。
 

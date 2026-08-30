@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Union
+from typing import Any
 
 
 @dataclass
@@ -24,15 +24,15 @@ class Field:
     name: str
     label: str
     # 支持单类型或类型列表（端口多类型声明场景）
-    type: Union[str, List[str]]  # string | number | boolean | object | array | any | [..]
-    desc: Optional[str] = None
+    type: str | list[str]  # string | number | boolean | object | array | any | [..]
+    desc: str | None = None
     required: bool = False
     default: Any = None
-    widget: Optional[str] = None  # input | textarea | select | slider | switch | json-editor | secret | model-picker | ports-list | plugin-list | code-editor | custom
-    extra: Dict[str, Any] = field(default_factory=dict)
+    widget: str | None = None  # input | textarea | select | slider | switch | json-editor | secret | model-picker | ports-list | plugin-list | code-editor | custom
+    extra: dict[str, Any] = field(default_factory=dict)
 
 
-def field_option(label: str, value: Any) -> Dict[str, Any]:
+def field_option(label: str, value: Any) -> dict[str, Any]:
     """便捷构建 option"""
     return {"label": label, "value": value}
 
@@ -40,10 +40,10 @@ def field_option(label: str, value: Any) -> Dict[str, Any]:
 def field_object(
     name: str,
     label: str,
-    object_schema: List[Field],
-    desc: Optional[str] = None,
+    object_schema: list[Field],
+    desc: str | None = None,
     required: bool = False,
-    widget: Optional[str] = None,
+    widget: str | None = None,
     default: Any = None,
 ) -> Field:
     """构建 object 类型字段"""
@@ -63,9 +63,9 @@ def field_array(
     name: str,
     label: str,
     item_schema: Field,
-    desc: Optional[str] = None,
+    desc: str | None = None,
     required: bool = False,
-    widget: Optional[str] = None,
+    widget: str | None = None,
     default: Any = None,
 ) -> Field:
     """构建 array 类型字段"""

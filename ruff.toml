@@ -1,0 +1,27 @@
+# Ruff 配置：只拦截真实缺陷与一致性问题，不强制 pycodestyle 风格。
+# select 刻意收窄：F（缺陷）、I（import 排序）、UP（现代化注解）、
+# RUF（ruff 专属提示）、BLE（盲异常提示）、B（常见 bug 模式）。
+# S（bandit 安全规则）对工作流节点代码误报过高（SQL/HTTP/哈希均属节点
+# 功能本身），实质安全边界已由 security/egress.py 与 fail-closed 逻辑覆盖。
+[lint]
+select = [
+    "F",
+    "I",
+    "UP",
+    "RUF",
+    "BLE",
+    "B",
+]
+ignore = [
+    "BLE001",  # blind except 是既有风格；新代码应尽量精确捕获
+    "B904",    # raise-without-from 提示，既有风格
+    "B905",    # zip strict 提示
+    "RUF001",  # 中文注释/字符串中的全角字符误报
+    "RUF002",
+    "RUF003",
+    "RUF015",  # 首元素分配优化提示，非缺陷
+]
+
+[lint.per-file-ignores]
+# code_node.py 保留 exec 定义（节点已不再注册，仅为历史引用）
+"nodes/code_node.py" = ["S102"]

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Dict, List
+from typing import Any
 
 from .base import JsonDict, WorkflowNode, register_node
 from .utils import json_resolve_path
@@ -71,7 +71,7 @@ class JsonExtractNode(WorkflowNode):
             data = raw
 
         ports = params.get("ports") or []
-        outputs: Dict[str, Any] = {}
+        outputs: dict[str, Any] = {}
 
         for port_cfg in ports:
             if not isinstance(port_cfg, dict):
@@ -143,7 +143,7 @@ class JsonBuildNode(WorkflowNode):
     @classmethod
     async def run(cls, inputs: JsonDict, params: JsonDict, context: JsonDict = None) -> JsonDict:
         fields = params.get("fields") or []
-        obj: Dict[str, Any] = {}
+        obj: dict[str, Any] = {}
 
         if not fields:
             for key, value in inputs.items():

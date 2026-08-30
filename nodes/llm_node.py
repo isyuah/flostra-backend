@@ -3,15 +3,16 @@ from __future__ import annotations
 import inspect
 import json
 import os
-from typing import Any, Dict, Optional
+from typing import Any
 
 from openai import AsyncOpenAI
 
-from .base import JsonDict, WorkflowNode, register_node
 from llm_plugins import LLMContext, PluginExecutor
 
+from .base import JsonDict, WorkflowNode, register_node
+
 # 平台模型预设列表（仅存元数据，不存明文密钥）
-PRESET_MODELS: Dict[str, Dict[str, Any]] = {
+PRESET_MODELS: dict[str, dict[str, Any]] = {
     "devstral2": {
         "label": "Devstral2",
         "base_url": "https://api.mistral.ai/v1",
@@ -33,7 +34,7 @@ PRESET_MODELS: Dict[str, Dict[str, Any]] = {
 }
 
 
-def _create_openai_client(base_url: Optional[str] = None, api_key: Optional[str] = None) -> AsyncOpenAI:
+def _create_openai_client(base_url: str | None = None, api_key: str | None = None) -> AsyncOpenAI:
     resolved_api_key = api_key or os.getenv("LLM_API_KEY")
     if not resolved_api_key:
         raise RuntimeError("缺少大模型 API Key（可在模型配置中填写，或配置环境变量 LLM_API_KEY）")
@@ -50,7 +51,7 @@ class SuperLLMNode(WorkflowNode):
     type = "llm"
 
     @staticmethod
-    def _build_model_picker_extra() -> Dict[str, Any]:
+    def _build_model_picker_extra() -> dict[str, Any]:
         preset_options = [{"label": meta["label"], "value": preset_id} for preset_id, meta in PRESET_MODELS.items()]
         default_preset = (
             next((opt["value"] for opt in preset_options if opt["value"] == "devstral2"), None)
@@ -163,7 +164,7 @@ class SuperLLMNode(WorkflowNode):
         plugin_executor = PluginExecutor(plugins_cfg, context)
         await plugin_executor.run_pre_process()
 
-        async def _execute_tool(func_name: str, args: Dict[str, Any]) -> Any:
+        async def _execute_tool(func_name: str, args: dict[str, Any]) -> Any:
             tool_fn = context.tool_functions.get(func_name)
             if not tool_fn:
                 raise ValueError(f"未注册的工具: {func_name}")
@@ -172,13 +173,13 @@ class SuperLLMNode(WorkflowNode):
                 result = await result
             return result
 
-        async def call_llm_with_context(ctx: LLMContext) -> Dict[str, Any]:
-            messages: list[Dict[str, Any]] = []
+        async def call_llm_with_context(ctx: LLMContext) -> dict[str, Any]:
+            messages: list[dict[str, Any]] = []
             if ctx.system_prompt:
                 messages.append({"role": "system", "content": ctx.system_prompt})
             messages.extend(ctx.messages or [])
 
-            kwargs: Dict[str, Any] = {"model": model or "", "temperature": temperature, "messages": messages}
+            kwargs: dict[str, Any] = {"model": model or "", "temperature": temperature, "messages": messages}
             if ctx.tools:
                 kwargs["tools"] = ctx.tools
 

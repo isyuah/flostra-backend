@@ -1,16 +1,16 @@
 from __future__ import annotations
 
 import asyncio
-import base64
 import json
-from typing import Any, Dict, Optional, List, Union
+from typing import Any
 
 import httpx
 
-from .base import JsonDict, WorkflowNode, register_node
 from io_utils import FileIoService
 from runtime_files import is_file_ref
 from security.egress import EgressError, check_outbound_url
+
+from .base import JsonDict, WorkflowNode, register_node
 
 
 @register_node
@@ -68,7 +68,7 @@ class HttpRequestNode(WorkflowNode):
 
         timeout = cls._parse_timeout(params.get("timeout"))
         retry = cls._parse_retry(params.get("retry"))
-        resp: Optional[httpx.Response] = None
+        resp: httpx.Response | None = None
 
         # 出站网络策略：首跳 URL 必须通过校验；重定向后的最终 URL 会在
         # 响应返回后再次校验，防止 DNS rebinding / 跳入内网。

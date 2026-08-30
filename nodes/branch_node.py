@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import ast
 import operator
-from typing import Any, Dict, List
+from typing import Any
 
 from .base import JsonDict, WorkflowNode, register_node
 
@@ -89,7 +89,7 @@ class BranchNode(WorkflowNode):
                 return ctx
             raise KeyError(name)
 
-        matched: List[str] = []
+        matched: list[str] = []
 
         for case in cases:
             if not isinstance(case, dict):
@@ -103,7 +103,7 @@ class BranchNode(WorkflowNode):
                     matched.append(branch_id)
                     if mode == "first_match":
                         break
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 raise ValueError(f"分支 {branch_id} 表达式错误: {exc}") from exc
 
         if not matched and default_branch:
@@ -112,7 +112,7 @@ class BranchNode(WorkflowNode):
         if not matched and not allow_empty:
             raise ValueError("分支未命中且未配置默认分支")
 
-        outputs: Dict[str, Any] = {}
+        outputs: dict[str, Any] = {}
         if matched:
             outputs["__matched"] = matched
 

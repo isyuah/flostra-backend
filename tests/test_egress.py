@@ -1,6 +1,5 @@
 """出站网络策略测试。"""
 
-import socket
 
 import pytest
 

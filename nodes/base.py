@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Any, Dict, List, Type
+from typing import Any
 
-JsonDict = Dict[str, Any]
+JsonDict = dict[str, Any]
 
 
 def _limit_str(s: Any, max_len: int = 200_000) -> str:
@@ -22,7 +22,7 @@ class WorkflowNode(ABC):
 
     # ---- 控制端口（默认每个节点 1 入 1 出；可由子类覆盖/扩展）----
     @classmethod
-    def control_inputs(cls) -> List[JsonDict]:
+    def control_inputs(cls) -> list[JsonDict]:
         """控制输入端口定义；子类可覆盖"""
         return [
             {
@@ -35,7 +35,7 @@ class WorkflowNode(ABC):
         ]
 
     @classmethod
-    def control_outputs(cls) -> List[JsonDict]:
+    def control_outputs(cls) -> list[JsonDict]:
         """控制输出端口定义；子类可覆盖"""
         return [
             {
@@ -69,10 +69,10 @@ class WorkflowNode(ABC):
         """执行节点逻辑，所有 I/O 都在后端完成"""
 
 
-_NODE_REGISTRY: Dict[str, Type[WorkflowNode]] = {}
+_NODE_REGISTRY: dict[str, type[WorkflowNode]] = {}
 
 
-def register_node(node_cls: Type[WorkflowNode]) -> Type[WorkflowNode]:
+def register_node(node_cls: type[WorkflowNode]) -> type[WorkflowNode]:
     """将节点类注册到内存表中，提供给路由查询使用"""
     node_type = getattr(node_cls, "type", None)
     if not node_type:
@@ -83,9 +83,9 @@ def register_node(node_cls: Type[WorkflowNode]) -> Type[WorkflowNode]:
     return node_cls
 
 
-def get_all_node_schemas() -> List[JsonDict]:
+def get_all_node_schemas() -> list[JsonDict]:
     """给前端：返回所有节点的 schema 列表"""
-    schemas: List[JsonDict] = []
+    schemas: list[JsonDict] = []
     for cls in _NODE_REGISTRY.values():
         schema = cls.get_schema()
         schema = cls.with_control_ports(schema)
@@ -93,7 +93,7 @@ def get_all_node_schemas() -> List[JsonDict]:
     return schemas
 
 
-def get_node_cls(node_type: str) -> Type[WorkflowNode]:
+def get_node_cls(node_type: str) -> type[WorkflowNode]:
     """根据 type 查找节点类"""
     try:
         return _NODE_REGISTRY[node_type]

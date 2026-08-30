@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List
+from typing import Any
 
 
 def json_resolve_path(data: Any, path: str, default: Any = None) -> Any:
@@ -22,7 +22,7 @@ def json_resolve_path(data: Any, path: str, default: Any = None) -> Any:
             return default
 
         key = ""
-        indexes: List[int] = []
+        indexes: list[int] = []
         buf = ""
         in_bracket = False
         for ch in seg:

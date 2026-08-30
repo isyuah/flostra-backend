@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import json
 import os
-from typing import Any, Dict, Optional
+from typing import Any
 
 _EVENT_MAX_BYTES_DEFAULT = 512 * 1024
 
@@ -30,7 +30,7 @@ def event_max_bytes() -> int:
         return _EVENT_MAX_BYTES_DEFAULT
 
 
-def redact_secrets(value: Any, secret_values: Optional[Dict[str, str]]) -> Any:
+def redact_secrets(value: Any, secret_values: dict[str, str] | None) -> Any:
     """递归脱敏：把 value 中出现的任意 secret 字面值替换为掩码。
 
     仅处理字符串。嵌套 dict/list 递归。secret_values 为空时原样返回。
@@ -55,7 +55,7 @@ def redact_secrets(value: Any, secret_values: Optional[Dict[str, str]]) -> Any:
     return value
 
 
-def sanitize_event_data(data: Dict[str, Any], secret_values: Optional[Dict[str, str]]) -> Dict[str, Any]:
+def sanitize_event_data(data: dict[str, Any], secret_values: dict[str, str] | None) -> dict[str, Any]:
     """对事件 data 中标记为敏感的字段做递归脱敏，并返回新 dict。
 
     目前对 ``node_completed`` 的 ``inputValues`` / ``outputValues`` 脱敏；
@@ -71,7 +71,7 @@ def sanitize_event_data(data: Dict[str, Any], secret_values: Optional[Dict[str, 
     return result
 
 
-def serialize_event_payload(payload: Dict[str, Any]) -> bytes:
+def serialize_event_payload(payload: dict[str, Any]) -> bytes:
     """序列化事件 payload，超过上限时抛 ValueError（由调用方决定失败策略）。"""
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     if len(body) > event_max_bytes():

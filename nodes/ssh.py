@@ -3,12 +3,13 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import shlex
-from typing import Any, Dict, Optional
+from typing import Any
 
 import asyncssh
 
-from .base import JsonDict, WorkflowNode, register_node
 from security.egress import check_outbound_host
+
+from .base import JsonDict, WorkflowNode, register_node
 
 
 def _to_str_limit(text: str, limit: int = 1_000_000) -> str:
@@ -45,12 +46,12 @@ def _merge_command(command: Any) -> str:
     raise ValueError("command 需为字符串或字符串数组")
 
 
-def _parse_env(val: Any) -> Optional[Dict[str, str]]:
+def _parse_env(val: Any) -> dict[str, str] | None:
     if val is None:
         return None
     if not isinstance(val, dict):
         raise ValueError("env 必须是对象(map)")
-    env_str: Dict[str, str] = {}
+    env_str: dict[str, str] = {}
     for k, v in val.items():
         env_str[str(k)] = "" if v is None else str(v)
     return env_str
@@ -159,11 +160,11 @@ class SSHNode(WorkflowNode):
             try:
                 key_obj = asyncssh.import_private_key(private_key, passphrase=passphrase)
                 client_keys = [key_obj]
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 raise ValueError(f"解析私钥失败：{exc}") from exc
 
         try:
-            conn_kwargs: Dict[str, Any] = {
+            conn_kwargs: dict[str, Any] = {
                 "host": host,
                 "port": port,
                 "username": username,
@@ -174,14 +175,14 @@ class SSHNode(WorkflowNode):
                 conn_kwargs["known_hosts"] = None
 
             conn = await asyncssh.connect(**conn_kwargs)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             raise ValueError(f"SSH 连接失败：{exc}") from exc
 
         try:
             proc = await conn.create_process(command=cmd, env=env)
             try:
                 stdout_data, stderr_data = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 proc.close()
                 try:
                     await proc.wait_closed()

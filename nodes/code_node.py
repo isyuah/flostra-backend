@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any, Dict
+from typing import Any
 
 from .base import JsonDict, WorkflowNode, register_node
 
@@ -107,12 +107,12 @@ class CodeNode(WorkflowNode):
 
         output_ports = params.get("outputPorts") or []
 
-        global_env: Dict[str, Any] = {"__name__": "__code_node__"}
-        local_env: Dict[str, Any] = {}
+        global_env: dict[str, Any] = {"__name__": "__code_node__"}
+        local_env: dict[str, Any] = {}
 
         try:
             exec(code_str, global_env, local_env)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             raise ValueError(f"代码节点执行代码时出错：{exc}") from exc
 
         func = local_env.get("run") or global_env.get("run")
@@ -134,10 +134,10 @@ class CodeNode(WorkflowNode):
 
         try:
             result = await loop.run_in_executor(None, _call_user)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             raise ValueError(f"代码节点运行 run(inputs, params) 时出错：{exc}") from exc
 
-        outputs: Dict[str, Any] = {}
+        outputs: dict[str, Any] = {}
         num_ports = len(output_ports)
 
         if num_ports == 0:

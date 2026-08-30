@@ -1,23 +1,26 @@
 from __future__ import annotations
 
-import asyncio
-import base64
 import json
-import uuid
-from typing import Any, Dict, List, Optional, cast
+from typing import Any
 
-import aiobotocore
 from aiobotocore.session import get_session
 from botocore.config import Config as BotoCoreConfig
 
-from .base import JsonDict, WorkflowNode, register_node
-from runtime_files import build_file_ref, upsert_file_record, get_file_record, new_file_id, is_file_ref
 from io_utils import FileIoService
+from runtime_files import (
+    build_file_ref,
+    get_file_record,
+    is_file_ref,
+    new_file_id,
+    upsert_file_record,
+)
 from security.egress import check_outbound_url
+
+from .base import JsonDict, WorkflowNode, register_node
 
 
 # Helper to create an S3 client
-async def _get_s3_client(conn_cfg: Dict[str, Any]):
+async def _get_s3_client(conn_cfg: dict[str, Any]):
     session = get_session()
     endpoint = conn_cfg.get("endpoint_url")
     if endpoint:
@@ -177,9 +180,9 @@ class S3PutNode(WorkflowNode):
         if content_input is None and file_ref_input is None:
             raise ValueError("必须提供 'content' 或 'file' 其中之一")
         
-        upload_data: Optional[bytes] = None
-        mime_type: Optional[str] = "application/octet-stream"
-        content_length: Optional[int] = None
+        upload_data: bytes | None = None
+        mime_type: str | None = "application/octet-stream"
+        content_length: int | None = None
 
         # 1. 尝试从文件引用处理
         if file_ref_input and is_file_ref(file_ref_input):
@@ -327,7 +330,7 @@ class S3ListNode(WorkflowNode):
         if not all([conn_cfg, bucket]):
             raise ValueError("连接信息, Bucket 不能为空")
 
-        files_refs: List[JsonDict] = []
+        files_refs: list[JsonDict] = []
 
         async with await _get_s3_client(conn_cfg) as client:
             try:

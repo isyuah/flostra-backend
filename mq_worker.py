@@ -1,22 +1,22 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
 import socket
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timezone
-from typing import Any, Dict, Optional
+from datetime import UTC, datetime
 from time import monotonic
-import contextlib
-
-from redis import asyncio as aioredis
+from typing import Any
 
 import aio_pika
 from aio_pika import DeliveryMode, IncomingMessage, Message
+from redis import asyncio as aioredis
 
+from security.event_safety import sanitize_event_data, serialize_event_payload
 from workflow_engine import (
     OverrideDTO,
     RunWorkflowSpec,
@@ -25,7 +25,6 @@ from workflow_engine import (
     WorkflowNodeDTO,
     run_workflow,
 )
-from security.event_safety import sanitize_event_data, serialize_event_payload
 
 logger = logging.getLogger(__name__)
 
@@ -53,7 +52,7 @@ def _first_non_null(*values: Any) -> Any:
     return None
 
 
-def _from_nested(d: Dict[str, Any], key: str, subkey: Optional[str] = None) -> Any:
+def _from_nested(d: dict[str, Any], key: str, subkey: str | None = None) -> Any:
     """安全地从嵌套 dict 中取值。"""
     if subkey is None:
         return d.get(key)
@@ -63,7 +62,7 @@ def _from_nested(d: Dict[str, Any], key: str, subkey: Optional[str] = None) -> A
     return None
 
 
-def _build_spec_from_graph(graph: Dict[str, Any]) -> RunWorkflowSpec:
+def _build_spec_from_graph(graph: dict[str, Any]) -> RunWorkflowSpec:
     """
     解析基于 React Flow `toObject()` 的最新图格式：
     - 节点字段主要在 data.* 内：type/params/inputValues/portConstants
@@ -76,7 +75,7 @@ def _build_spec_from_graph(graph: Dict[str, Any]) -> RunWorkflowSpec:
     targets = graph.get("targets")
     overrides = graph.get("overrides") or []
 
-    def _node_type(n: Dict[str, Any]) -> Optional[str]:
+    def _node_type(n: dict[str, Any]) -> str | None:
         return _from_nested(n, "data", "type") or n.get("type")
 
     node_dtos = []
@@ -165,11 +164,11 @@ def generate_worker_name(queue: str, worker_id: str) -> str:
 @dataclass
 class ParsedRunTask:
     execution_id: str
-    attempt_id: Optional[str]
+    attempt_id: str | None
     spec: RunWorkflowSpec
-    workflow_meta: Dict[str, Any]
-    secrets: Dict[str, str]  # New field
-    extra_context: Dict[str, Any]  # 存放上游传来的通用 context
+    workflow_meta: dict[str, Any]
+    secrets: dict[str, str]  # New field
+    extra_context: dict[str, Any]  # 存放上游传来的通用 context
 
 
 class MQEventEmitter:
@@ -180,9 +179,9 @@ class MQEventEmitter:
         channel: aio_pika.abc.AbstractChannel,
         result_queue: str,
         execution_id: str,
-        attempt_id: Optional[str] = None,
-        worker_id: Optional[str] = None,
-        secret_values: Optional[Dict[str, str]] = None,
+        attempt_id: str | None = None,
+        worker_id: str | None = None,
+        secret_values: dict[str, str] | None = None,
     ) -> None:
         self._channel = channel
         self._result_queue = result_queue
@@ -204,7 +203,7 @@ class MQEventEmitter:
                 "sequenceId": self._sequence,
                 "event": event.event,
                 "data": data,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "timestamp": datetime.now(UTC).isoformat(),
             }
             if self._attempt_id:
                 payload["attemptId"] = self._attempt_id
@@ -239,9 +238,9 @@ class WorkflowMQWorker:
         self._queue_out = os.getenv("RABBITMQ_QUEUE_RESULT", "workflow.run_result")
         self._prefetch = _env_int("WORKFLOW_PREFETCH", 4)
         self._max_concurrency = _env_int("WORKFLOW_MAX_CONCURRENCY", 4)
-        self._connection: Optional[aio_pika.RobustConnection] = None
-        self._channel: Optional[aio_pika.abc.AbstractChannel] = None
-        self._consume_tag: Optional[str] = None
+        self._connection: aio_pika.RobustConnection | None = None
+        self._channel: aio_pika.abc.AbstractChannel | None = None
+        self._consume_tag: str | None = None
         self._semaphore = asyncio.Semaphore(self._max_concurrency)
         self._closing = asyncio.Event()
         self._worker_id = generate_worker_id()
@@ -252,16 +251,16 @@ class WorkflowMQWorker:
         self._heartbeat_interval = float(os.getenv("WORKER_HEARTBEAT_SECONDS", "10"))
         self._heartbeat_ttl = int(os.getenv("WORKER_HEARTBEAT_TTL_SECONDS", "30"))
         self._execution_heartbeat_interval = _positive_float_env("WORKER_EXECUTION_HEARTBEAT_SECONDS", 3.0)
-        self._redis: Optional[aioredis.Redis] = None
-        self._heartbeat_task: Optional[asyncio.Task] = None
+        self._redis: aioredis.Redis | None = None
+        self._heartbeat_task: asyncio.Task | None = None
         # 运行统计
-        self._started_at = datetime.now(timezone.utc).isoformat()
-        self._last_execution_at: Optional[str] = None
+        self._started_at = datetime.now(UTC).isoformat()
+        self._last_execution_at: str | None = None
         self._success = 0
         self._failed = 0
         self._errors = 0
         self._inflight = 0
-        self._avg_duration_ms: Optional[float] = None
+        self._avg_duration_ms: float | None = None
         self._ewma_alpha = float(os.getenv("WORKER_EWMA_ALPHA", "0.2"))
 
     async def start(self) -> None:
@@ -310,18 +309,18 @@ class WorkflowMQWorker:
         if self._channel and self._consume_tag:
             try:
                 await self._channel.cancel(self._consume_tag)
-            except Exception:  # noqa: BLE001
+            except Exception:
                 pass
         if self._connection:
             try:
                 await self._connection.close()
-            except Exception:  # noqa: BLE001
+            except Exception:
                 pass
         if self._redis:
             try:
                 await self._clear_worker_state()
                 await self._redis.close()
-            except Exception:  # noqa: BLE001
+            except Exception:
                 pass
         self._connection = None
         self._channel = None
@@ -335,7 +334,7 @@ class WorkflowMQWorker:
     async def _handle_message(self, message: IncomingMessage) -> None:
         try:
             parsed = self._parse_task(message)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             self._errors += 1
             execution_id = self._safe_execution_id(message)
             attempt_id = self._safe_attempt_id(message)
@@ -362,7 +361,7 @@ class WorkflowMQWorker:
             return
 
         execution_heartbeat_stop = asyncio.Event()
-        execution_heartbeat_task: Optional[asyncio.Task] = None
+        execution_heartbeat_task: asyncio.Task | None = None
         terminal_delivered = False
 
         async def stop_execution_heartbeat() -> None:
@@ -436,7 +435,7 @@ class WorkflowMQWorker:
             await stop_execution_heartbeat()
             await self._publish_cancelled(base_emitter, parsed.execution_id)
             terminal_delivered = True
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             self._errors += 1
             logger.exception("Workflow execution failed, executionId=%s", parsed.execution_id)
             await stop_execution_heartbeat()
@@ -455,7 +454,7 @@ class WorkflowMQWorker:
             await stop_execution_heartbeat()
             duration_ms = (monotonic() - start_ts) * 1000
             self._update_ewma(duration_ms)
-            self._last_execution_at = datetime.now(timezone.utc).isoformat()
+            self._last_execution_at = datetime.now(UTC).isoformat()
             self._inflight = max(0, self._inflight - 1)
             logger.info("Run end: executionId=%s duration_ms=%.2f", parsed.execution_id, duration_ms)
             await self._publish_heartbeat(force=True)
@@ -489,7 +488,7 @@ class WorkflowMQWorker:
                 raise ValueError("attemptId must be a UUID") from exc
 
         workflow = payload.get("workflow") or {}
-        workflow_meta: Dict[str, Any] = {
+        workflow_meta: dict[str, Any] = {
             "id": workflow.get("id"),
             "workspaceId": (workflow.get("workspace") or {}).get("id") if isinstance(workflow.get("workspace"), dict) else None,
             "name": workflow.get("name"),
@@ -526,7 +525,7 @@ class WorkflowMQWorker:
         except Exception:
             return "unknown"
 
-    def _safe_attempt_id(self, message: IncomingMessage) -> Optional[str]:
+    def _safe_attempt_id(self, message: IncomingMessage) -> str | None:
         try:
             raw = json.loads(message.body.decode("utf-8"))
             value = raw.get("attemptId")
@@ -534,7 +533,7 @@ class WorkflowMQWorker:
         except Exception:
             return None
 
-    async def _publish_error(self, execution_id: str, error_message: str, attempt_id: Optional[str] = None) -> None:
+    async def _publish_error(self, execution_id: str, error_message: str, attempt_id: str | None = None) -> None:
         if not self._channel:
             return
         emitter = MQEventEmitter(self._channel, self._queue_out, execution_id, attempt_id, self._worker_id)
@@ -572,7 +571,7 @@ class WorkflowMQWorker:
                 try:
                     await asyncio.wait_for(stop_event.wait(), timeout=self._execution_heartbeat_interval)
                     continue
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     pass
                 if stop_event.is_set():
                     continue
@@ -584,7 +583,7 @@ class WorkflowMQWorker:
                 )
         except asyncio.CancelledError:
             return
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             logger.warning("Execution heartbeat failed for %s: %s", execution_id, exc)
 
     def _cancellation_key(self, execution_id: str) -> str:
@@ -596,7 +595,7 @@ class WorkflowMQWorker:
             return False
         try:
             return bool(await self._redis.get(self._cancellation_key(execution_id)))
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             # Redis outages must not turn healthy workflow work into failures.
             # The control plane reports cancellation unavailable before it marks
             # an execution CANCEL_REQUESTED, so this is only a degraded worker.
@@ -621,7 +620,7 @@ class WorkflowMQWorker:
             # 测试连接
             await self._redis.ping()
             await self._publish_heartbeat(force=True, init=True)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             self._redis = None
             logger.warning("Redis not available, heartbeat disabled: %s", exc)
 
@@ -632,18 +631,18 @@ class WorkflowMQWorker:
                 await self._publish_heartbeat()
                 try:
                     await asyncio.wait_for(self._closing.wait(), timeout=self._heartbeat_interval)
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     # 正常心跳间隔超时，继续循环
                     continue
         except asyncio.CancelledError:
             return
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             logger.warning("Heartbeat loop error: %s", exc)
 
     async def _publish_heartbeat(self, force: bool = False, init: bool = False) -> None:
         if not self._redis:
             return
-        now_iso = datetime.now(timezone.utc).isoformat()
+        now_iso = datetime.now(UTC).isoformat()
         key = self._redis_key(f"worker:{self._worker_id}")
         online_key = self._redis_key("online")
         payload = {
@@ -668,7 +667,7 @@ class WorkflowMQWorker:
             pipe.sadd(online_key, self._worker_id)
             pipe.expire(online_key, self._heartbeat_ttl)
             await pipe.execute()
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             if force or init:
                 logger.warning("Publish heartbeat failed: %s", exc)
 

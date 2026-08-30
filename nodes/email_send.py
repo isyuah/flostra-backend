@@ -6,11 +6,11 @@ import smtplib
 import ssl
 from email.message import EmailMessage
 from email.utils import make_msgid
-from typing import Any, List, Optional, Tuple
 
-from .base import JsonDict, WorkflowNode, register_node
 from io_utils import FileIoService
 from runtime_files import is_file_ref
+
+from .base import JsonDict, WorkflowNode, register_node
 
 
 @register_node
@@ -74,7 +74,7 @@ class EmailSendNode(WorkflowNode):
         body_text = body if isinstance(body, str) else json.dumps(body, ensure_ascii=False) if body is not None else ""
         
         # 预加载附件数据 (Async Step)
-        attachments_data: List[Tuple[bytes, str, str]] = [] # (content, filename, mime)
+        attachments_data: list[tuple[bytes, str, str]] = [] # (content, filename, mime)
         raw_attachments = inputs.get("attachments")
         if raw_attachments:
             list_attachments = []
@@ -124,7 +124,7 @@ class EmailSendNode(WorkflowNode):
             def _safe_close(smtp: smtplib.SMTP) -> None:
                 try:
                     smtp.quit()
-                except Exception:  # noqa: BLE001
+                except Exception:
                     try:
                         smtp.close()
                     except Exception:
@@ -152,7 +152,7 @@ class EmailSendNode(WorkflowNode):
                     finally:
                         _safe_close(smtp)
                 return msg["Message-ID"] or ""
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 raise ValueError(f"邮件发送失败：{exc}") from None
 
         message_id = await loop.run_in_executor(None, _send_email)

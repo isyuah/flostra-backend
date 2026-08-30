@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Dict, Union
+from typing import Any
 from urllib.parse import urlparse
 
 import redis.asyncio as redis
 
-from .base import JsonDict, WorkflowNode, register_node
 from security.egress import check_outbound_host
+
+from .base import JsonDict, WorkflowNode, register_node
 
 
 @register_node
@@ -65,7 +66,7 @@ class RedisNode(WorkflowNode):
 
         # 处理连接信息
         conn_input = inputs.get("connection")
-        client_kwargs: Dict[str, Any] = {}
+        client_kwargs: dict[str, Any] = {}
 
         url = None
 

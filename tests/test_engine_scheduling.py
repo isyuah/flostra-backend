@@ -1,7 +1,7 @@
 """Workflow 引擎并行调度与节点级重试测试。"""
 
 import asyncio
-from typing import Any, Dict, List
+from typing import Any
 
 from workflow_engine import (
     RetryableNodeError,
@@ -15,7 +15,7 @@ from workflow_engine import (
 
 class _CollectingEmitter:
     def __init__(self) -> None:
-        self.events: List[Dict[str, Any]] = []
+        self.events: list[dict[str, Any]] = []
         self._lock = asyncio.Lock()
 
     async def emit(self, event: WorkflowEvent) -> None:
@@ -26,11 +26,11 @@ class _CollectingEmitter:
         return [e for e in self.events if e["data"].get("nodeId") == node_id]
 
 
-def _manual_node(node_id: str, params: Dict[str, Any] | None = None) -> WorkflowNodeDTO:
+def _manual_node(node_id: str, params: dict[str, Any] | None = None) -> WorkflowNodeDTO:
     return WorkflowNodeDTO(id=node_id, type="trigger.manual", params=params or {})
 
 
-async def _run(spec: RunWorkflowSpec, context: Dict[str, Any] | None = None):
+async def _run(spec: RunWorkflowSpec, context: dict[str, Any] | None = None):
     emitter = _CollectingEmitter()
     await run_workflow(run_id="test-run", spec=spec, emit=emitter.emit, context=context)
     return emitter
