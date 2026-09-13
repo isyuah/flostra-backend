@@ -4,8 +4,10 @@ import asyncio
 import collections
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from time import monotonic
 from typing import Any
 
+from metrics import NODE_DURATION_SECONDS, NODE_RETRIES_TOTAL
 from nodes import get_node_cls
 from secrets_store import resolve_secrets_in_params
 
@@ -441,6 +443,42 @@ async def _execute_node(
     out_edges_ctl: dict[str, list[WorkflowEdgeDTO]],
     control_fired: set[str],
 ) -> None:
+    """执行单个节点，并把整段耗时（含重试与失败）计入指标。"""
+    started = monotonic()
+    try:
+        await _execute_node_impl(
+            node_id=node_id,
+            node=node,
+            run_id=run_id,
+            emit=emit,
+            context=context,
+            context_outputs=context_outputs,
+            in_edges_data=in_edges_data,
+            overrides_by_node=overrides_by_node,
+            out_edges_ctl=out_edges_ctl,
+            control_fired=control_fired,
+        )
+    except BaseException:
+        # 含 asyncio.CancelledError：被取消的节点也落在 error 桶，
+        # 否则「取消/停机期间的节点耗时」会在直方图里凭空消失。
+        NODE_DURATION_SECONDS.labels(node.type, "error").observe(monotonic() - started)
+        raise
+    NODE_DURATION_SECONDS.labels(node.type, "success").observe(monotonic() - started)
+
+
+async def _execute_node_impl(
+    *,
+    node_id: str,
+    node: WorkflowNodeDTO,
+    run_id: str,
+    emit: EventEmitter,
+    context: dict[str, Any] | None,
+    context_outputs: dict[str, JsonDict],
+    in_edges_data: dict[str, list[WorkflowEdgeDTO]],
+    overrides_by_node: dict[str, list[OverrideDTO]],
+    out_edges_ctl: dict[str, list[WorkflowEdgeDTO]],
+    control_fired: set[str],
+) -> None:
     """执行单个节点：事件发布 + secret 解析 + retryPolicy 重试。"""
 
     # 广播节点开始
@@ -492,6 +530,7 @@ async def _execute_node(
         except RetryableNodeError as exc:
             last_exc = exc
             if attempt < retry_policy["maxAttempts"]:
+                NODE_RETRIES_TOTAL.labels(node.type).inc()
                 await asyncio.sleep(retry_policy["backoffMs"] / 1000 * (2 ** (attempt - 1)))
                 continue
             raise

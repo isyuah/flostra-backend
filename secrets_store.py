@@ -3,13 +3,20 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from metrics import SECRET_RESOLUTION_FAILED_TOTAL
+
 # 匹配 [[ KEY ]] 或 [[KEY]]，忽略前后空格
 # Group 1 是 KEY
 SECRET_PATTERN = re.compile(r"\[\[\s*(\S+)\s*\]\]")
 
 
 class SecretResolutionError(ValueError):
-    """引用了不存在的 secret，且该引用无法解析。"""
+    """引用了不存在的 secret，且该引用无法解析（fail-closed 触发）。"""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message)
+        # 在这里计数：所有 fail-closed 路径都构造本异常，不需要逐个 raise 点埋点。
+        SECRET_RESOLUTION_FAILED_TOTAL.inc()
 
 
 def resolve_secrets_in_params(params: dict[str, Any], secret_map: dict[str, str]) -> dict[str, Any]:

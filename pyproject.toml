@@ -15,6 +15,7 @@ dependencies = [
     "longchain>=0.4.2",
     "openai>=2.8.1",
     "openpyxl>=3.1.5",
+    "prometheus-client>=0.26.0",
     "python-docx>=1.2.0",
     "redis>=7.1.0",
     "sqlalchemy[asyncio]>=2.0.44",

@@ -5,6 +5,8 @@ import os
 import signal
 from pathlib import Path
 
+from logging_setup import setup_logging
+from metrics import start_metrics_server_from_env
 from mq_worker import WorkflowMQWorker
 
 
@@ -63,21 +65,10 @@ def load_env_from_dotenv() -> None:
         os.environ[key] = value
 
 
-def setup_logging() -> None:
-    level_name = os.getenv("WORKER_LOG_LEVEL", "INFO").upper()
-    level = getattr(logging, level_name, logging.INFO)
-    if not logging.getLogger().handlers:
-        logging.basicConfig(
-            level=level,
-            format="%(asctime)s %(levelname)s %(name)s:%(lineno)d %(message)s",
-        )
-    else:
-        logging.getLogger().setLevel(level)
-
-
 async def _run_worker() -> None:
     load_env_from_dotenv()
     setup_logging()
+    metrics_enabled = start_metrics_server_from_env()
     logger = logging.getLogger(__name__)
 
     stop_event = asyncio.Event()
@@ -94,7 +85,10 @@ async def _run_worker() -> None:
             # Windows/limited environments可能不支持 add_signal_handler
             pass
 
-    logger.info("Worker service starting...")
+    logger.info(
+        "Worker service starting",
+        extra={"metrics_enabled": metrics_enabled, "reconnect_delay_seconds": reconnect_delay},
+    )
     while not stop_event.is_set():
         # WorkflowMQWorker.stop() marks its instance as closing. Recreate it for
         # every failed initial connection so a RabbitMQ restart cannot leave the

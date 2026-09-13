@@ -16,6 +16,14 @@ import aio_pika
 from aio_pika import DeliveryMode, IncomingMessage, Message
 from redis import asyncio as aioredis
 
+from logging_setup import log_context, secret_scope
+from metrics import (
+    CAPACITY,
+    EVENTS_PUBLISHED_TOTAL,
+    EXECUTION_DURATION_SECONDS,
+    EXECUTIONS_TOTAL,
+    INFLIGHT,
+)
 from security.event_safety import sanitize_event_data, serialize_event_payload
 from workflow_engine import (
     OverrideDTO,
@@ -217,7 +225,13 @@ class MQEventEmitter:
                 content_type="application/json",
                 content_encoding="utf-8",
             )
-            await self._channel.default_exchange.publish(message, routing_key=self._result_queue)
+            try:
+                await self._channel.default_exchange.publish(message, routing_key=self._result_queue)
+            except Exception:
+                # 终态事件发布失败会让调用方 NACK 重投，这里按事件类型记账。
+                EVENTS_PUBLISHED_TOTAL.labels(event.event, "error").inc()
+                raise
+            EVENTS_PUBLISHED_TOTAL.labels(event.event, "published").inc()
 
 
 class ExecutionCancelled(Exception):
@@ -242,6 +256,8 @@ class WorkflowMQWorker:
         self._channel: aio_pika.abc.AbstractChannel | None = None
         self._consume_tag: str | None = None
         self._semaphore = asyncio.Semaphore(self._max_concurrency)
+        # 容量是配置事实，与 broker 连接状态无关：连不上时也应能看出进程配置。
+        CAPACITY.set(self._max_concurrency)
         self._closing = asyncio.Event()
         self._worker_id = generate_worker_id()
         self._worker_name = generate_worker_name(self._queue_in, self._worker_id)
@@ -267,10 +283,9 @@ class WorkflowMQWorker:
         if self._connection:
             return
         logger.info(
-            "Connecting to RabbitMQ: workerId=%s name=%s queue=%s",
-            self._worker_id,
-            self._worker_name,
+            "Connecting to RabbitMQ: queue=%s",
             self._queue_in,
+            extra={"worker_id": self._worker_id, "worker_name": self._worker_name},
         )
 
         # Redis 连接（可选，失败不阻塞 MQ 运行）
@@ -287,13 +302,12 @@ class WorkflowMQWorker:
         # 开始消费
         self._consume_tag = await queue_in.consume(self._on_message, no_ack=False)
         logger.info(
-            "WorkflowMQWorker started, workerId=%s name=%s, consuming '%s', publishing to '%s', prefetch=%d, concurrency=%d",
-            self._worker_id,
-            self._worker_name,
+            "WorkflowMQWorker started, consuming '%s', publishing to '%s', prefetch=%d, concurrency=%d",
             self._queue_in,
             self._queue_out,
             self._prefetch,
             self._max_concurrency,
+            extra={"worker_id": self._worker_id, "worker_name": self._worker_name},
         )
 
         # 启动心跳
@@ -338,11 +352,29 @@ class WorkflowMQWorker:
             self._errors += 1
             execution_id = self._safe_execution_id(message)
             attempt_id = self._safe_attempt_id(message)
-            logger.exception("Failed to parse workflow task, executionId=%s: %s", execution_id, exc)
+            logger.exception(
+                "Failed to parse workflow task: %s",
+                exc,
+                extra={"execution_id": execution_id, "attempt_id": attempt_id},
+            )
             await self._publish_error(execution_id, str(exc), attempt_id)
             await message.ack()
             return
 
+        with log_context(
+            execution_id=parsed.execution_id,
+            attempt_id=parsed.attempt_id,
+            worker_id=self._worker_id,
+        ), secret_scope(parsed.secrets.values()):
+            await self._run_task(message, parsed)
+
+    async def _run_task(self, message: IncomingMessage, parsed: ParsedRunTask) -> None:
+        """
+        执行一条已解析的任务。
+
+        运行上下文字段（execution_id/attempt_id/worker_id）与本次运行的 secret 字面值
+        已由调用方登记，这里只负责编排事件发布、指标与 ACK/NACK 决策。
+        """
         base_emitter = MQEventEmitter(
             self._channel,
             self._queue_out,
@@ -356,6 +388,7 @@ class WorkflowMQWorker:
             # The Go control plane sets this key after the execution enters
             # CANCEL_REQUESTED. A message may already be in this consumer's
             # prefetch buffer, so RabbitMQ alone cannot make this race safe.
+            EXECUTIONS_TOTAL.labels("cancelled_before_start").inc()
             await self._publish_cancelled(base_emitter, parsed.execution_id)
             await message.ack()
             return
@@ -383,8 +416,10 @@ class WorkflowMQWorker:
                 status = (event.data or {}).get("status")
                 if status == "success":
                     self._success += 1
+                    EXECUTIONS_TOTAL.labels("success").inc()
                 elif status == "error":
                     self._failed += 1
+                    EXECUTIONS_TOTAL.labels("error").inc()
                 # Stop before publishing the terminal message. The emitter lock
                 # still preserves any already-started heartbeat ahead of it.
                 execution_heartbeat_stop.set()
@@ -398,15 +433,17 @@ class WorkflowMQWorker:
                 )
 
         logger.info(
-            "Run begin: executionId=%s nodes=%d edges=%d entry=%s targets=%s",
-            parsed.execution_id,
-            len(parsed.spec.nodes),
-            len(parsed.spec.edges),
-            parsed.spec.entry_nodes,
-            parsed.spec.targets,
+            "Run begin",
+            extra={
+                "nodes": len(parsed.spec.nodes),
+                "edges": len(parsed.spec.edges),
+                "entry_nodes": parsed.spec.entry_nodes,
+                "targets": parsed.spec.targets,
+            },
         )
 
         self._inflight += 1
+        INFLIGHT.set(self._inflight)
         start_ts = monotonic()
 
         try:
@@ -429,15 +466,17 @@ class WorkflowMQWorker:
                 emit=counting_emit,
                 context=engine_context,
             )
-            logger.info("Run finished: executionId=%s", parsed.execution_id)
+            logger.info("Run finished")
         except ExecutionCancelled:
-            logger.info("Workflow execution canceled: executionId=%s", parsed.execution_id)
+            EXECUTIONS_TOTAL.labels("cancelled").inc()
+            logger.info("Workflow execution canceled")
             await stop_execution_heartbeat()
             await self._publish_cancelled(base_emitter, parsed.execution_id)
             terminal_delivered = True
         except Exception as exc:
             self._errors += 1
-            logger.exception("Workflow execution failed, executionId=%s", parsed.execution_id)
+            EXECUTIONS_TOTAL.labels("error").inc()
+            logger.exception("Workflow execution failed")
             await stop_execution_heartbeat()
             await base_emitter.emit(
                 WorkflowEvent(
@@ -454,9 +493,11 @@ class WorkflowMQWorker:
             await stop_execution_heartbeat()
             duration_ms = (monotonic() - start_ts) * 1000
             self._update_ewma(duration_ms)
+            EXECUTION_DURATION_SECONDS.observe(duration_ms / 1000.0)
             self._last_execution_at = datetime.now(UTC).isoformat()
             self._inflight = max(0, self._inflight - 1)
-            logger.info("Run end: executionId=%s duration_ms=%.2f", parsed.execution_id, duration_ms)
+            INFLIGHT.set(self._inflight)
+            logger.info("Run end", extra={"duration_ms": round(duration_ms, 2)})
             await self._publish_heartbeat(force=True)
             # 终态事件发布失败（broker 不可用、事件超限等）时 NACK 重投，
             # 让 broker 重新投递任务；成功才 ack。这样执行结果不会因为

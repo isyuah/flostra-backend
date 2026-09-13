@@ -23,6 +23,8 @@ import os
 import socket
 from urllib.parse import urlparse
 
+from metrics import EGRESS_DENIED_TOTAL
+
 # 云厂商 metadata 端点（常见固定 IP 段）。
 _METADATA_NETS = (
     ipaddress.ip_network("169.254.169.254/32"),
@@ -60,6 +62,17 @@ class EgressError(ValueError):
     """目标地址被 egress 策略拒绝。"""
 
 
+def _reason_bucket(reason: str) -> str:
+    """把策略原因归到有限枚举，避免把 IP 段写进指标标签。"""
+    return "metadata" if reason.startswith("cloud metadata") else "private_network"
+
+
+def _deny(kind: str, message: str) -> EgressError:
+    """记一次拒绝并返回异常，调用方 raise 它。"""
+    EGRESS_DENIED_TOTAL.labels(kind).inc()
+    return EgressError(message)
+
+
 def _truthy(value: str | None) -> bool:
     if value is None:
         return False
@@ -75,15 +88,19 @@ def _allow_metadata() -> bool:
 
 
 def _classify(ip: ipaddress._BaseAddress) -> tuple[bool, str]:
-    """返回 (是否允许, 拒绝原因)。"""
-    if not _allow_private():
-        for net in _PRIVATE_NETS + _EXTRA_NETS:
-            if ip in net:
-                return False, f"private/unsafe network {net}"
+    """返回 (是否允许, 拒绝原因)。
+
+    先判 metadata：169.254.169.254 同时落在私网段里，但「试图访问云元数据」
+    是比普通私网访问更强的信号，reason 需要独立可观测（指标按 reason 分桶）。
+    """
     if not _allow_metadata():
         for net in _METADATA_NETS:
             if ip in net:
                 return False, f"cloud metadata address {net}"
+    if not _allow_private():
+        for net in _PRIVATE_NETS + _EXTRA_NETS:
+            if ip in net:
+                return False, f"private/unsafe network {net}"
     return True, ""
 
 
@@ -102,20 +119,20 @@ def check_outbound_host(host: str, port: int | None = None) -> None:
     避免“解析不到就放行”的 fail-open。
     """
     if not host or not host.strip():
-        raise EgressError("empty outbound host is not allowed")
+        raise _deny("invalid_target", "empty outbound host is not allowed")
 
     host = host.strip().rstrip(".").lower()
     literal = _parse_host(host)
     if literal is not None:
         allowed, reason = _classify(literal)
         if not allowed:
-            raise EgressError(f"outbound host {host!r} rejected: {reason}")
+            raise _deny(_reason_bucket(reason), f"outbound host {host!r} rejected: {reason}")
         return
 
     try:
         infos = socket.getaddrinfo(host, port or 0, type=socket.SOCK_STREAM)
     except OSError as exc:
-        raise EgressError(f"cannot resolve outbound host {host!r}: {exc}") from exc
+        raise _deny("unresolved", f"cannot resolve outbound host {host!r}: {exc}") from exc
 
     seen: set[str] = set()
     for info in infos:
@@ -126,7 +143,7 @@ def check_outbound_host(host: str, port: int | None = None) -> None:
         seen.add(key)
         allowed, reason = _classify(ip)
         if not allowed:
-            raise EgressError(f"outbound host {host!r} resolves to {key}: {reason}")
+            raise _deny(_reason_bucket(reason), f"outbound host {host!r} resolves to {key}: {reason}")
 
 
 def check_outbound_url(url: str) -> None:
@@ -137,19 +154,19 @@ def check_outbound_url(url: str) -> None:
     - hostname 为域名或 IP 字面量，经 ``check_outbound_host`` 校验。
     """
     if not isinstance(url, str) or not url.strip():
-        raise EgressError("empty outbound URL is not allowed")
+        raise _deny("invalid_target", "empty outbound URL is not allowed")
 
     parsed = urlparse(url)
     if parsed.scheme not in {"http", "https"}:
-        raise EgressError(f"outbound URL scheme {parsed.scheme!r} is not allowed")
+        raise _deny("invalid_scheme", f"outbound URL scheme {parsed.scheme!r} is not allowed")
 
     host = parsed.hostname
     if not host:
-        raise EgressError("outbound URL must include a host")
+        raise _deny("invalid_target", "outbound URL must include a host")
 
     try:
         port = parsed.port
     except ValueError as exc:
-        raise EgressError(f"invalid outbound URL port: {exc}") from exc
+        raise _deny("invalid_target", f"invalid outbound URL port: {exc}") from exc
 
     check_outbound_host(host, port)
