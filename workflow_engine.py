@@ -13,6 +13,13 @@ from secrets_store import resolve_secrets_in_params
 
 JsonDict = dict[str, Any]
 
+# 需要运行上下文才能作为入口的触发器：节点类型 → 上下文里必须存在的键。
+# 缺键时该入口在本次运行中不可达（由 run_workflow 的默认入口筛选执行）。
+_CONTEXT_GATED_TRIGGERS: dict[str, str] = {
+    "trigger.http": "request",
+    "trigger.cron": "schedule",
+}
+
 
 @dataclass
 class WorkflowNodeDTO:
@@ -275,9 +282,15 @@ async def run_workflow(
     if not spec.entry_nodes:
         trigger_entries = [nid for nid in graph["source_nodes"] if node_map[nid].type.startswith("trigger.")]
         if trigger_entries:
-            default_entries = trigger_entries
-            if not (context or {}).get("request"):
-                default_entries = [nid for nid in default_entries if node_map[nid].type != "trigger.http"]
+            # 依赖运行上下文的触发器：上下文里没有对应键时，本次运行不从它进入
+            # （手动运行不该走 cron 入口，cron 运行没有 request 也不该走 http 入口）。
+            run_context = context or {}
+            default_entries = []
+            for nid in trigger_entries:
+                required_key = _CONTEXT_GATED_TRIGGERS.get(node_map[nid].type)
+                if required_key and not run_context.get(required_key):
+                    continue
+                default_entries.append(nid)
         else:
             default_entries = [nid for nid in graph["source_nodes"]]
 

@@ -162,3 +162,58 @@ class HttpStartNode(WorkflowNode):
             "data": data,
             "request": request_obj,
         }
+
+
+@register_node
+class CronStartNode(WorkflowNode):
+    """Cron 触发器：消费控制面 cron 调度写入的运行上下文
+
+    控制面在 schedule 触发时把 ``context.schedule = {name, cronExpression}``
+    随任务一起持久化（见 gback internal/schedule/service.go）；手动或 webhook
+    触发没有该键，引擎的入口筛选也会因此跳过本节点。
+    """
+
+    type = "trigger.cron"
+
+    @classmethod
+    def get_schema(cls) -> JsonDict:
+        return {
+            "type": cls.type,
+            "label": "Cron 触发器",
+            "description": "由控制面 cron 调度触发的入口，透传本次触发的 schedule 元数据",
+            "category": "触发器",
+            "icon": "trigger",
+            "inputs": [],
+            "outputs": [
+                {
+                    "name": "schedule",
+                    "label": "Schedule 元数据",
+                    "type": "object",
+                    "required": False,
+                    "desc": "运行上下文 context.schedule（name / cronExpression）",
+                },
+                {
+                    "name": "scheduleName",
+                    "label": "Schedule 名称",
+                    "type": "string",
+                    "required": False,
+                },
+                {
+                    "name": "cronExpression",
+                    "label": "Cron 表达式",
+                    "type": "string",
+                    "required": False,
+                },
+            ],
+            "parameters": [],
+        }
+
+    @classmethod
+    async def run(cls, inputs: JsonDict, params: JsonDict, context: JsonDict = None) -> JsonDict:
+        ctx_schedule = context.get("schedule") if isinstance(context, dict) else None
+        schedule = ctx_schedule if isinstance(ctx_schedule, dict) else {}
+        return {
+            "schedule": schedule,
+            "scheduleName": str(schedule.get("name") or ""),
+            "cronExpression": str(schedule.get("cronExpression") or ""),
+        }
